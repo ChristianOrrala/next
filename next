@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""next: a scratch list of what to do next, scoped to the current folder.
+
+  next          open the list; it stays open and reloads when the file changes
+  next <text>   add an item from any pane without opening the list
+  next --path   print the file that holds this folder's list
+
+The scope is the git root of the current folder, or the folder itself outside a repo.
+Lists live in ~/.local/share/next/ (override with NEXT_DIR), never inside the repo.
+The screen runs past to future, top to bottom: the last 3 done items, then every pending item.
+The file keeps every item forever and runs the other way: newest first.
+
+Keys: a add · e/Enter edit · x/Space done or reopen · J/K move · d delete · u undo · q quit
+"""
+import curses
+import locale
+import os
+import subprocess
+import sys
+import textwrap
+
+SHOW_DONE = 3
+STORE = os.path.expanduser(os.environ.get("NEXT_DIR", "~/.local/share/next"))
+KEYS = "a add  e edit  x done  J/K move  d delete  u undo  q quit"
+
+
+def scope():
+    try:
+        root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        root = ""
+    return root or os.getcwd()
+
+
+def list_file(root):
+    return os.path.join(STORE, (root.strip("/").replace("/", "-") or "root") + ".md")
+
+
+# The list in memory runs oldest to newest: every done item in the order it was done, then the pending ones.
+
+def normalize(items):
+    return [i for i in items if i[0]] + [i for i in items if not i[0]]
+
+
+def visible(items):
+    return [i for i in items if i[0]][-SHOW_DONE:] + [i for i in items if not i[0]]
+
+
+def parse(text):
+    items = [[line[3] in "xX", line[6:]] for line in text.splitlines()
+             if line.startswith(("- [ ] ", "- [x] ", "- [X] "))]
+    return normalize(items[::-1])
+
+
+def render(items):
+    return "".join(f"- [{'x' if done else ' '}] {text}\n" for done, text in reversed(items))
+
+
+def take(items, item):
+    del items[next(n for n, i in enumerate(items) if i is item)]
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def stamp(path):
+    try:
+        return os.stat(path).st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+class App:
+    def __init__(self, scr, path, title):
+        self.scr, self.path, self.title = scr, path, title
+        self.items, self.seen = parse(read(path)), stamp(path)
+        self.cur = next((n for n, (done, _) in enumerate(self.view()) if not done), 0)
+        self.top = 0
+        self.history = []
+
+    def view(self):
+        return visible(self.items)
+
+    def clamp(self):
+        self.cur = max(0, min(self.cur, len(self.view()) - 1))
+
+    def reload(self):
+        if stamp(self.path) != self.seen:
+            self.items, self.seen = parse(read(self.path)), stamp(self.path)
+            self.clamp()
+
+    def change(self, fn):
+        """Apply fn(items, view) to the list as it is on disk and save it; fn returns the item the cursor lands on."""
+        self.reload()
+        before = render(self.items)
+        target = fn(self.items, self.view())
+        self.items = normalize(self.items)
+        after = render(self.items)
+        if after != before:
+            self.history.append(before)
+            write(self.path, after)
+            self.seen = stamp(self.path)
+        for n, item in enumerate(self.view()):
+            if item is target:
+                self.cur = n
+        self.clamp()
+
+    # actions (each fn finds the list empty when another pane cleared it meanwhile)
+
+    def add(self):
+        text = self.ask("add: ")
+        if text:
+            item = [False, text]
+            self.change(lambda items, view: items.append(item) or item)
+
+    def edit(self):
+        if not self.view():
+            return
+        text = self.ask("edit: ", self.view()[self.cur][1])
+        if text:
+            def fn(items, view):
+                if not view:
+                    return None
+                view[self.cur][1] = text
+                return view[self.cur]
+            self.change(fn)
+
+    def toggle(self):
+        def fn(items, view):
+            if not view:
+                return None
+            item = view[self.cur]
+            following = view[self.cur + 1] if self.cur + 1 < len(view) else None
+            take(items, item)
+            item[0] = not item[0]
+            # Done: newest done sits just above the pending items. Reopened: back on top of them.
+            items.insert(sum(1 for i in items if i[0]), item)
+            return (following or item) if item[0] else item
+        self.change(fn)
+
+    def move(self, step):
+        def fn(items, view):
+            if not view:
+                return None
+            item, j = view[self.cur], self.cur + step
+            if 0 <= j < len(view) and view[j][0] == item[0]:
+                a = next(n for n, i in enumerate(items) if i is item)
+                b = next(n for n, i in enumerate(items) if i is view[j])
+                items[a], items[b] = items[b], items[a]
+            return item
+        self.change(fn)
+
+    def delete(self):
+        def fn(items, view):
+            if not view:
+                return None
+            take(items, view[self.cur])
+            rest = view[:self.cur] + view[self.cur + 1:]
+            return rest[min(self.cur, len(rest) - 1)] if rest else None
+        self.change(fn)
+
+    def undo(self):
+        if self.history:
+            text = self.history.pop()
+            write(self.path, text)
+            self.items, self.seen = parse(text), stamp(self.path)
+            self.clamp()
+
+    # screen
+
+    def put(self, y, x, text, attr=0):
+        h, w = self.scr.getmaxyx()
+        if 0 <= y < h and x < w - 1:
+            try:
+                self.scr.addnstr(y, x, text, w - 1 - x, attr)
+            except curses.error:
+                pass
+
+    def draw(self):
+        self.scr.erase()
+        h, w = self.scr.getmaxyx()
+        view = self.view()
+        shown_done = sum(1 for d, _ in view if d)
+        all_done = sum(1 for d, _ in self.items if d)
+        self.put(0, 1, f"next: {self.title}  ({len(view) - shown_done} to do, {all_done} done)", curses.A_BOLD)
+
+        rows = []  # (index in view or None, text, attr)
+        for n, (d, text) in enumerate(view):
+            if n == shown_done and shown_done:
+                rows.append((None, "-" * min(w - 6, 40), curses.A_DIM))
+            for k, line in enumerate(textwrap.wrap(text, max(w - 8, 10)) or [""]):
+                box = ("[x] " if d else "[ ] ") if k == 0 else "    "
+                rows.append((n, box + line, curses.A_DIM if d else curses.A_NORMAL))
+
+        body = max(h - 3, 1)
+        mine = [r for r, row in enumerate(rows) if row[0] == self.cur]
+        if mine:
+            self.top = min(self.top, mine[0])
+            self.top = max(self.top, mine[-1] - body + 1)
+        self.top = max(0, min(self.top, len(rows) - body))
+        for y, (n, text, attr) in enumerate(rows[self.top:self.top + body]):
+            here = n == self.cur
+            self.put(2 + y, 1, ("> " if here else "  ") + text, attr | (curses.A_REVERSE if here else 0))
+        if not view:
+            self.put(2, 3, "nothing yet: press a to add", curses.A_DIM)
+        self.put(h - 1, 1, KEYS, curses.A_DIM)
+
+    def ask(self, label, text=""):
+        buf = list(text)
+        curses.curs_set(1)
+        self.scr.timeout(-1)
+        try:
+            while True:
+                h, w = self.scr.getmaxyx()
+                line = label + "".join(buf)
+                shown = line[-(w - 3):]
+                self.scr.move(h - 1, 0)
+                self.scr.clrtoeol()
+                self.put(h - 1, 1, shown, curses.A_BOLD)
+                self.scr.move(h - 1, min(1 + len(shown), w - 2))
+                key = self.scr.get_wch()
+                if key in ("\n", "\r", curses.KEY_ENTER):
+                    curses.flushinp()  # a multi-line paste must not run its other lines as keys
+                    return "".join(buf).strip()
+                if key == "\x1b":
+                    return None
+                if key in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                    if buf:
+                        buf.pop()
+                elif key == "\x15":
+                    buf.clear()
+                elif key == curses.KEY_RESIZE:
+                    self.draw()
+                elif isinstance(key, str) and key.isprintable():
+                    buf.append(key)
+        finally:
+            curses.curs_set(0)
+            self.scr.timeout(1000)
+
+    def run(self):
+        curses.curs_set(0)
+        self.scr.timeout(1000)  # wake every second to pick up `next <text>` from other panes
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
+        while True:
+            self.reload()
+            self.draw()
+            try:
+                key = self.scr.get_wch()
+            except curses.error:
+                continue
+            if key == "q":
+                return
+            elif key in ("j", curses.KEY_DOWN):
+                self.cur += 1
+                self.clamp()
+            elif key in ("k", curses.KEY_UP):
+                self.cur -= 1
+                self.clamp()
+            elif key == "a":
+                self.add()
+            elif key in ("e", "\n", "\r", curses.KEY_ENTER):
+                self.edit()
+            elif key in ("x", " "):
+                self.toggle()
+            elif key == "J":
+                self.move(1)
+            elif key == "K":
+                self.move(-1)
+            elif key in ("d", curses.KEY_DC):
+                self.delete()
+            elif key == "u":
+                self.undo()
+
+
+def main(argv):
+    locale.setlocale(locale.LC_ALL, "")
+    root = scope()
+    path = list_file(root)
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    if argv[:1] == ["--path"]:
+        print(path)
+        return 0
+    if argv:
+        text = " ".join(argv).strip()
+        if text:
+            items = parse(read(path))
+            items.append([False, text])
+            write(path, render(normalize(items)))
+        return 0
+    os.environ.setdefault("ESCDELAY", "25")
+    try:
+        curses.wrapper(lambda scr: App(scr, path, os.path.basename(root) or root).run())
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
