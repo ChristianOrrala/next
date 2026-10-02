@@ -15,14 +15,32 @@ while it works.
    [ ] check the error path when the file is missing
    [ ] added from another pane
 
- a add  e edit  x done  J/K move  d delete  u undo  q quit
+ a add  e edit  x done  J/K move  tab col  d delete  u undo  q quit
+```
+
+In a wide pane (a split below the agent, say) the done items move to their own column on
+the right, newest on top, and the pending ones get the left:
+
+```
+ next: my-project  (3 to do, 12 done)
+
+ > [ ] then: update the README                 │   [x] review the migration it wrote
+   [ ] check the error path when the file is   │   [x] ask it to add tests for the parser
+       missing                                 │   [x] wire the config loader
+   [ ] added from another pane                 │   … +9 older
+ a add  e edit  x done  J/K move  tab col  d delete  u undo  q quit
 ```
 
 - **Scoped to the folder.** Inside a git repo the list belongs to the repo root, so every
   pane in that repo shares it; outside a repo it belongs to the current folder.
 - **Stays open.** It reloads when the file changes, so `next <text>` from any other pane
   shows up at once.
-- **Past to future, top to bottom.** The last 3 done items, then every pending item.
+- **Fits the pane on its own.** Tall: done items above the pending ones, filling the free
+  rows (at least 3, at most half the pane), with `… +N older` for the rest. Wide (70 or more
+  columns and more than twice as wide as tall): pending on the left, done on the right. The
+  switch has a few columns of slack, so dragging a split doesn't flicker; the footer shortens
+  in narrow panes.
+- **Shows what arrived.** An item added from another pane is highlighted for a few seconds.
 - **Nothing is lost.** The file keeps every item forever, newest first.
 - **No dependencies.** One Python 3 file using the standard library's `curses`
   (macOS and Linux).
@@ -55,6 +73,7 @@ next --path       # print the file that holds this folder's list
 | `e` or `Enter` | edit the item under the cursor |
 | `x` or `Space` | mark done; on a done item, reopen it on top of the pending ones |
 | `J` / `K` | move the item down / up |
+| `Tab`, `h` / `l` or arrows | jump to the other column (to the done or pending items in a tall pane) |
 | `j` / `k` or arrows | move the cursor |
 | `d` | delete the item |
 | `u` | undo the last change |
@@ -86,6 +105,12 @@ Each list is plain Markdown, newest first, and safe to read or edit by hand:
 - [x] ask it to add tests for the parser
 - [x] wire the config loader
 - [x] an older done item, kept but not shown
+```
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests
 ```
 
 ## License

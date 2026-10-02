@@ -7,21 +7,28 @@
 
 The scope is the git root of the current folder, or the folder itself outside a repo.
 Lists live in ~/.local/share/next/ (override with NEXT_DIR), never inside the repo.
-The screen runs past to future, top to bottom: the last 3 done items, then every pending item.
-The file keeps every item forever and runs the other way: newest first.
+The layout follows the pane. Tall: done items above the pending ones, as many as the free rows
+allow (at least 3, at most half). Wide (70+ columns and wider than twice the height): pending on
+the left, done on the right, newest on top. The file keeps every item forever, newest first.
 
-Keys: a add · e/Enter edit · x/Space done or reopen · J/K move · d delete · u undo · q quit
+Keys: a add · e/Enter edit · x/Space done or reopen · J/K move · Tab/h/l other column ·
+      d delete · u undo · q quit
 """
 import curses
 import locale
 import os
 import subprocess
 import sys
-import textwrap
+import time
+import unicodedata
 
-SHOW_DONE = 3
+SHOW_DONE = 3    # done items a tall pane shows even when the pending ones fill it
 STORE = os.path.expanduser(os.environ.get("NEXT_DIR", "~/.local/share/next"))
-KEYS = "a add  e edit  x done  J/K move  d delete  u undo  q quit"
+KEYS = "a add  e edit  x done  J/K move  tab col  d delete  u undo  q quit"
+SHORT_KEYS = "a e x J K tab d u q"
+WIDE_AT = 70     # columns before the done items move to their own column
+SLACK = 3        # hysteresis around the switch, so dragging a split doesn't flicker
+FRESH = 3        # seconds an item added from another pane stays highlighted
 
 
 def scope():
@@ -43,8 +50,102 @@ def normalize(items):
     return [i for i in items if i[0]] + [i for i in items if not i[0]]
 
 
-def visible(items):
-    return [i for i in items if i[0]][-SHOW_DONE:] + [i for i in items if not i[0]]
+# text measured in terminal cells: wide characters (CJK, most emoji) take two
+
+def cells(text):
+    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1
+               for c in text)
+
+
+def cut(text, n):
+    """How many characters of text fit in n cells (at least one, so wrapping always advances)."""
+    used = 0
+    for k, c in enumerate(text):
+        used += cells(c)
+        if used > n:
+            return max(k, 1)
+    return len(text)
+
+
+def clip(text, n):
+    return text if cells(text) <= n else text[:cut(text, n - 1)] + "…"
+
+
+def wrap(text, n):
+    lines, line = [], ""
+    for word in text.split():
+        while cells(word) > n:
+            if line:
+                lines.append(line)
+                line = ""
+            k = cut(word, n)
+            lines.append(word[:k])
+            word = word[k:]
+        if not word:
+            continue
+        if line and cells(line) + 1 + cells(word) > n:
+            lines.append(line)
+            line = word
+        else:
+            line = f"{line} {word}" if line else word
+    return lines + [line] if line else lines or [""]
+
+
+# layout
+
+def is_wide(w, h, was):
+    slack = -SLACK if was else SLACK
+    return w >= WIDE_AT + slack and w > 2 * h + slack
+
+
+def footer(w):
+    return next((keys for keys in (KEYS, SHORT_KEYS) if len(keys) <= w - 2), "")
+
+
+def arrange(items, w, h, wide):
+    """Lay the list out on a w x h screen.
+
+    Returns (view, panels): view is the items the cursor walks, in order; each panel is
+    (x, width, rows) and each row is (index in view or None, text, kind), kind one of
+    todo, done, rule, note. Done items take one line each; pending items wrap.
+    """
+    body = max(h - 3, 1)
+    done = [i for i in items if i[0]]
+    todo = [i for i in items if not i[0]]
+
+    def pending_rows(width, first):
+        rows = []
+        for n, (_, text) in enumerate(todo):
+            for k, line in enumerate(wrap(text, max(width - 6, 4))):
+                rows.append((first + n, ("[ ] " if k == 0 else "    ") + line, "todo"))
+        return rows
+
+    def done_row(n, text, width):
+        return (n, clip("[x] " + text, width - 2), "done")
+
+    def older(hidden, width):
+        return [(None, clip(f"… +{hidden} older", width - 2), "note")] if hidden else []
+
+    if wide:
+        dw = max(24, min(60, w * 2 // 5))
+        pw = w - dw - 4
+        fit = len(done) if len(done) <= body else body - 1
+        shown = done[::-1][:fit]
+        right = [done_row(len(todo) + n, text, dw - 1) for n, (_, text) in enumerate(shown)]
+        right += older(len(done) - fit, dw - 1)
+        return todo + shown, [(1, pw, pending_rows(pw, 0)), (pw + 4, dw - 1, right)]
+
+    pw = w - 2
+    left = pending_rows(pw, 0)
+    free = body - len(left) - 1
+    fit = min(len(done), max(SHOW_DONE, min(free, body // 2)))
+    shown = done[len(done) - fit:] if fit else []
+    rows = older(len(done) - fit, pw)
+    rows += [done_row(n, text, pw) for n, (_, text) in enumerate(shown)]
+    if shown and todo:
+        rows.append((None, "-" * min(w - 6, 40), "rule"))
+    rows += [(len(shown) + n, text, kind) for n, text, kind in left]
+    return shown + todo, [(1, pw, rows)]
 
 
 def parse(text):
@@ -88,20 +189,47 @@ class App:
     def __init__(self, scr, path, title):
         self.scr, self.path, self.title = scr, path, title
         self.items, self.seen = parse(read(path)), stamp(path)
-        self.cur = next((n for n, (done, _) in enumerate(self.view()) if not done), 0)
-        self.top = 0
+        self.wide = False
+        self.tops = {}       # scroll offset per panel
+        self.fresh = []      # (item, when its highlight ends) for items another pane added
         self.history = []
+        self.focus = next((i for i in self.items if not i[0]), None)  # the item under the cursor
+
+    def layout(self):
+        h, w = self.scr.getmaxyx()
+        self.wide = is_wide(w, h, self.wide)
+        return arrange(self.items, w, h, self.wide)
 
     def view(self):
-        return visible(self.items)
+        return self.layout()[0]
 
-    def clamp(self):
-        self.cur = max(0, min(self.cur, len(self.view()) - 1))
+    @property
+    def cur(self):
+        return next((n for n, i in enumerate(self.view()) if i is self.focus), 0)
+
+    def point(self):
+        """Keep the cursor on a visible item: the first pending one when its own went out of view."""
+        view = self.view()
+        if not any(i is self.focus for i in view):
+            self.focus = next((i for i in view if not i[0]), view[0] if view else None)
+
+    def load(self, text):
+        """Take the list from text, keeping the cursor on the same item and flagging what is new."""
+        old = list(self.items)
+        self.items = parse(text)
+        until = time.monotonic() + FRESH
+        for item in self.items:
+            if item in old:
+                old.remove(item)
+            else:
+                self.fresh.append((item, until))
+        self.focus = next((i for i in self.items if i == self.focus), None)
+        self.point()
 
     def reload(self):
         if stamp(self.path) != self.seen:
-            self.items, self.seen = parse(read(self.path)), stamp(self.path)
-            self.clamp()
+            self.seen = stamp(self.path)
+            self.load(read(self.path))
 
     def change(self, fn):
         """Apply fn(items, view) to the list as it is on disk and save it; fn returns the item the cursor lands on."""
@@ -114,12 +242,22 @@ class App:
             self.history.append(before)
             write(self.path, after)
             self.seen = stamp(self.path)
-        for n, item in enumerate(self.view()):
-            if item is target:
-                self.cur = n
-        self.clamp()
+        self.focus = target
+        self.point()
 
     # actions (each fn finds the list empty when another pane cleared it meanwhile)
+
+    def step(self, delta):
+        view = self.view()
+        if view:
+            self.focus = view[max(0, min(self.cur + delta, len(view) - 1))]
+
+    def jump(self):
+        """Go to the nearest item of the other kind: the other column when wide."""
+        view, cur = self.view(), self.cur
+        others = [n for n, i in enumerate(view) if view and i[0] != view[cur][0]]
+        if others:
+            self.focus = view[min(others, key=lambda n: abs(n - cur))]
 
     def add(self):
         text = self.ask("add: ")
@@ -144,7 +282,9 @@ class App:
             if not view:
                 return None
             item = view[self.cur]
-            following = view[self.cur + 1] if self.cur + 1 < len(view) else None
+            same = [i for i in view if i[0] == item[0]]
+            k = next(n for n, i in enumerate(same) if i is item)
+            following = same[k + 1] if k + 1 < len(same) else same[k - 1] if k else None
             take(items, item)
             item[0] = not item[0]
             # Done: newest done sits just above the pending items. Reopened: back on top of them.
@@ -177,8 +317,9 @@ class App:
         if self.history:
             text = self.history.pop()
             write(self.path, text)
-            self.items, self.seen = parse(text), stamp(self.path)
-            self.clamp()
+            self.seen = stamp(self.path)
+            self.load(text)
+            self.fresh.clear()
 
     # screen
 
@@ -193,31 +334,34 @@ class App:
     def draw(self):
         self.scr.erase()
         h, w = self.scr.getmaxyx()
-        view = self.view()
-        shown_done = sum(1 for d, _ in view if d)
-        all_done = sum(1 for d, _ in self.items if d)
-        self.put(0, 1, f"next: {self.title}  ({len(view) - shown_done} to do, {all_done} done)", curses.A_BOLD)
+        self.point()
+        view, panels = self.layout()
+        cur = self.cur
+        todo = sum(1 for d, _ in self.items if not d)
+        head = f"next: {self.title}  ({todo} to do, {len(self.items) - todo} done)"
+        self.put(0, 1, head if cells(head) <= w - 2 else clip(f"next: {self.title}", w - 2), curses.A_BOLD)
 
-        rows = []  # (index in view or None, text, attr)
-        for n, (d, text) in enumerate(view):
-            if n == shown_done and shown_done:
-                rows.append((None, "-" * min(w - 6, 40), curses.A_DIM))
-            for k, line in enumerate(textwrap.wrap(text, max(w - 8, 10)) or [""]):
-                box = ("[x] " if d else "[ ] ") if k == 0 else "    "
-                rows.append((n, box + line, curses.A_DIM if d else curses.A_NORMAL))
-
+        now = time.monotonic()
+        self.fresh = [(i, t) for i, t in self.fresh if t > now]
         body = max(h - 3, 1)
-        mine = [r for r, row in enumerate(rows) if row[0] == self.cur]
-        if mine:
-            self.top = min(self.top, mine[0])
-            self.top = max(self.top, mine[-1] - body + 1)
-        self.top = max(0, min(self.top, len(rows) - body))
-        for y, (n, text, attr) in enumerate(rows[self.top:self.top + body]):
-            here = n == self.cur
-            self.put(2 + y, 1, ("> " if here else "  ") + text, attr | (curses.A_REVERSE if here else 0))
+        for p, (x, width, rows) in enumerate(panels):
+            mine = [r for r, row in enumerate(rows) if row[0] == cur]
+            top = self.tops.get(p, 0)
+            if mine:
+                top = max(min(top, mine[0]), mine[-1] - body + 1)
+            self.tops[p] = top = max(0, min(top, len(rows) - body))
+            for y, (n, text, kind) in enumerate(rows[top:top + body]):
+                here = n is not None and n == cur
+                attr = curses.A_NORMAL if kind == "todo" else curses.A_DIM
+                if n is not None and any(i is view[n] for i, _ in self.fresh):
+                    attr = curses.A_BOLD | curses.A_UNDERLINE
+                self.put(2 + y, x, ("> " if here else "  ") + text, attr | (curses.A_REVERSE if here else 0))
+        if len(panels) > 1:
+            for y in range(2, 2 + body):
+                self.put(y, panels[1][0] - 2, "│", curses.A_DIM)
         if not view:
             self.put(2, 3, "nothing yet: press a to add", curses.A_DIM)
-        self.put(h - 1, 1, KEYS, curses.A_DIM)
+        self.put(h - 1, 1, footer(w), curses.A_DIM)
 
     def ask(self, label, text=""):
         buf = list(text)
@@ -268,11 +412,11 @@ class App:
             if key == "q":
                 return
             elif key in ("j", curses.KEY_DOWN):
-                self.cur += 1
-                self.clamp()
+                self.step(1)
             elif key in ("k", curses.KEY_UP):
-                self.cur -= 1
-                self.clamp()
+                self.step(-1)
+            elif key in ("\t", "h", "l", curses.KEY_LEFT, curses.KEY_RIGHT):
+                self.jump()
             elif key == "a":
                 self.add()
             elif key in ("e", "\n", "\r", curses.KEY_ENTER):
