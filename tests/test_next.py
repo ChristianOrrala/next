@@ -49,6 +49,26 @@ class Mode(unittest.TestCase):
         self.assertFalse(nx.is_wide(66, 10, True))
 
 
+class Clipboard(unittest.TestCase):
+    def test_uses_the_first_tool_found_and_falls_back_to_osc52(self):
+        runs, out = [], []
+        real = nx.shutil.which, nx.subprocess.run, nx.sys.stdout
+        class Out:
+            def write(self, s): out.append(s)
+            def flush(self): pass
+        try:
+            nx.shutil.which = lambda name: "/bin/" + name if name == "pbcopy" else None
+            nx.subprocess.run = lambda cmd, **kw: runs.append((cmd, kw["input"]))
+            self.assertTrue(nx.clipboard("hi"))
+            self.assertEqual(runs, [(["pbcopy"], "hi")])
+            nx.shutil.which = lambda name: None
+            nx.sys.stdout = Out()
+            self.assertTrue(nx.clipboard("hi"))
+            self.assertEqual(out, ["\x1b]52;c;aGk=\a"])
+        finally:
+            nx.shutil.which, nx.subprocess.run, nx.sys.stdout = real
+
+
 class Footer(unittest.TestCase):
     def test_shrinks_with_width(self):
         self.assertEqual(nx.footer(200), nx.KEYS)
@@ -65,8 +85,8 @@ class Wide(unittest.TestCase):
         self.assertTrue(24 <= rw <= 60)
         self.assertLess(lx + lw, rx)
         self.assertLessEqual(rx + rw, 119)
-        self.assertEqual(texts(left), ["[ ] todo 0", "[ ] todo 1"])
-        self.assertEqual(texts(right), ["[x] done 3", "[x] done 2", "[x] done 1", "[x] done 0"])
+        self.assertEqual(texts(left), ["todo 0", "todo 1"])
+        self.assertEqual(texts(right), ["done 3", "done 2", "done 1", "done 0"])
 
     def test_done_column_fills_the_height_and_counts_the_rest(self):
         view, panels = nx.arrange(items(30, 1), 120, 12, True)
@@ -80,18 +100,20 @@ class Wide(unittest.TestCase):
         _, panels = nx.arrange([[True, "a very long done item " * 5], [False, "x"]], 120, 12, True)
         right = panels[1][2]
         self.assertEqual(len(right), 1)
-        self.assertLessEqual(nx.cells(right[0][1]), panels[1][1] - 2)
+        self.assertLessEqual(nx.cells(right[0][1]), panels[1][1] - 1)
 
 
 class Tall(unittest.TestCase):
-    def test_done_fills_free_rows_up_to_half(self):
+    def test_pending_on_top_done_below_newest_first(self):
         view, panels = nx.arrange(items(40, 2), 45, 50, False)
         rows = panels[0][2]
         done_rows = [r for r in rows if r[2] == "done"]
         self.assertEqual(len(done_rows), 47 // 2)
-        self.assertEqual(rows[0][1], f"… +{40 - 47 // 2} older")
-        self.assertEqual(texts(rows)[-2:], ["[ ] todo 0", "[ ] todo 1"])
-        self.assertEqual(view[len(done_rows) - 1], [True, "done 39"])  # oldest to newest, newest last
+        self.assertEqual(texts(rows)[:2], ["todo 0", "todo 1"])
+        self.assertEqual(rows[2][2], "rule")
+        self.assertEqual(done_rows[0][1], "done 39")
+        self.assertEqual(rows[-1][1], f"… +{40 - 47 // 2} older")
+        self.assertEqual([t for _, t in view[:3]], ["todo 0", "todo 1", "done 39"])
 
     def test_at_least_three_done_when_full(self):
         _, panels = nx.arrange(items(10, 60), 45, 20, False)
@@ -99,12 +121,75 @@ class Tall(unittest.TestCase):
 
     def test_no_older_note_when_everything_fits(self):
         _, panels = nx.arrange(items(2, 2), 45, 50, False)
-        self.assertEqual(texts(panels[0][2]), ["[x] done 0", "[x] done 1", "-" * 39, "[ ] todo 0", "[ ] todo 1"])
+        self.assertEqual(texts(panels[0][2]), ["todo 0", "todo 1", "-" * 39, "done 1", "done 0"])
 
-    def test_pending_wraps(self):
+    def test_pending_wraps_with_a_hanging_indent(self):
         _, panels = nx.arrange([[False, "word " * 20]], 30, 20, False)
-        self.assertGreater(len(panels[0][2]), 1)
-        self.assertTrue(texts(panels[0][2])[1].startswith("    "))
+        lines = texts(panels[0][2])
+        self.assertGreater(len(lines), 1)
+        self.assertTrue(lines[0].startswith("word"))
+        self.assertTrue(lines[1].startswith("  word"))
+
+
+class Screen:
+    def __init__(self, h, w):
+        self.size = (h, w)
+
+    def getmaxyx(self):
+        return self.size
+
+
+class Selection(unittest.TestCase):
+    def app(self, text="- [ ] b\n- [ ] a\n- [x] old\n"):
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "list.md")
+        nx.write(path, text)
+        return nx.App(Screen(40, 45), path, "t")
+
+    def test_starts_with_nothing_selected(self):
+        app = self.app()
+        self.assertIsNone(app.focus)
+        self.assertIsNone(app.cur)
+
+    def test_moving_selects_the_first_pending_item(self):
+        app = self.app()
+        app.step(1)
+        self.assertEqual(app.focus, [False, "a"])
+
+    def test_unselect_clears_the_cursor(self):
+        app = self.app()
+        app.step(1)
+        app.unselect()
+        self.assertIsNone(app.focus)
+
+    def test_item_keys_do_nothing_without_a_selection(self):
+        app = self.app()
+        before = nx.read(app.path)
+        app.toggle()
+        app.delete()
+        app.move(1)
+        self.assertEqual(nx.read(app.path), before)
+        self.assertIsNone(app.focus)
+
+    def test_copy_takes_the_whole_item(self):
+        app = self.app("- [ ] a long item that would wrap in a narrow pane\n")
+        copied = []
+        real, nx.clipboard = nx.clipboard, lambda text: copied.append(text) or True
+        try:
+            app.copy()
+            app.step(1)
+            app.copy()
+        finally:
+            nx.clipboard = real
+        self.assertEqual(copied, ["a long item that would wrap in a narrow pane"])
+        self.assertEqual(app.note[0], "copied")
+
+    def test_reload_keeps_nothing_selected(self):
+        app = self.app()
+        nx.write(app.path, "- [ ] c\n" + nx.read(app.path))
+        app.seen = None
+        app.reload()
+        self.assertIsNone(app.focus)
 
 
 if __name__ == "__main__":

@@ -7,28 +7,32 @@
 
 The scope is the git root of the current folder, or the folder itself outside a repo.
 Lists live in ~/.local/share/next/ (override with NEXT_DIR), never inside the repo.
-The layout follows the pane. Tall: done items above the pending ones, as many as the free rows
-allow (at least 3, at most half). Wide (70+ columns and wider than twice the height): pending on
-the left, done on the right, newest on top. The file keeps every item forever, newest first.
+The layout follows the pane. Tall: pending on top, done items below them, newest first, as many as
+the free rows allow (at least 3, at most half). Wide (70+ columns and wider than twice the height):
+pending on the left, done on the right, newest on top. The file keeps every item forever, newest first.
+Nothing is selected until you move; Esc clears the selection.
 
-Keys: a add · e/Enter edit · x/Space done or reopen · J/K move · Tab/h/l other column ·
-      d delete · u undo · q quit
+Keys: a add · e/Enter edit · x/Space done or reopen · y copy · J/K move · Tab/h/l other column ·
+      d delete · u undo · Esc unselect · q quit
 """
+import base64
 import curses
 import locale
 import os
+import shutil
 import subprocess
 import sys
 import time
 import unicodedata
 
-SHOW_DONE = 3    # done items a tall pane shows even when the pending ones fill it
+SHOW_DONE = 3    # done items a tall pane keeps below the pending ones even when those fill it
 STORE = os.path.expanduser(os.environ.get("NEXT_DIR", "~/.local/share/next"))
-KEYS = "a add  e edit  x done  J/K move  tab col  d delete  u undo  q quit"
-SHORT_KEYS = "a e x J K tab d u q"
+KEYS = "a add  e edit  x done  y copy  J/K move  tab col  d delete  u undo  esc unselect  q quit"
+SHORT_KEYS = "a e x y J K tab d u esc q"
 WIDE_AT = 70     # columns before the done items move to their own column
 SLACK = 3        # hysteresis around the switch, so dragging a split doesn't flicker
 FRESH = 3        # seconds an item added from another pane stays highlighted
+NOTE = 1.5       # seconds a note like "copied" replaces the footer
 
 
 def scope():
@@ -42,6 +46,28 @@ def scope():
 
 def list_file(root):
     return os.path.join(STORE, (root.strip("/").replace("/", "-") or "root") + ".md")
+
+
+def clipboard(text):
+    """Put text on the system clipboard: a clipboard tool when there is one, else the OSC 52
+    escape, which most terminals (and tmux with set-clipboard on) honour, over SSH too."""
+    tools = [("pbcopy", ["pbcopy"], True),
+             ("wl-copy", ["wl-copy"], os.environ.get("WAYLAND_DISPLAY")),
+             ("xclip", ["xclip", "-selection", "clipboard"], os.environ.get("DISPLAY")),
+             ("xsel", ["xsel", "--clipboard", "--input"], os.environ.get("DISPLAY"))]
+    for name, cmd, usable in tools:
+        if usable and shutil.which(name):
+            try:
+                subprocess.run(cmd, input=text, text=True, check=True, timeout=2)
+                return True
+            except (OSError, subprocess.SubprocessError):
+                pass
+    try:
+        sys.stdout.write("\x1b]52;c;" + base64.b64encode(text.encode()).decode() + "\a")
+        sys.stdout.flush()
+        return True
+    except OSError:
+        return False
 
 
 # The list in memory runs oldest to newest: every done item in the order it was done, then the pending ones.
@@ -107,7 +133,8 @@ def arrange(items, w, h, wide):
 
     Returns (view, panels): view is the items the cursor walks, in order; each panel is
     (x, width, rows) and each row is (index in view or None, text, kind), kind one of
-    todo, done, rule, note. Done items take one line each; pending items wrap.
+    todo, done, rule, note. Rows carry the bare text, so a copied line is just the item; done
+    items take one line each, pending items wrap with a two-cell hanging indent.
     """
     body = max(h - 3, 1)
     done = [i for i in items if i[0]]
@@ -116,36 +143,33 @@ def arrange(items, w, h, wide):
     def pending_rows(width, first):
         rows = []
         for n, (_, text) in enumerate(todo):
-            for k, line in enumerate(wrap(text, max(width - 6, 4))):
-                rows.append((first + n, ("[ ] " if k == 0 else "    ") + line, "todo"))
+            for k, line in enumerate(wrap(text, max(width - 3, 4))):
+                rows.append((first + n, ("  " if k else "") + line, "todo"))
         return rows
 
-    def done_row(n, text, width):
-        return (n, clip("[x] " + text, width - 2), "done")
+    def done_rows(shown, width):
+        return [(len(todo) + n, clip(text, width - 1), "done") for n, (_, text) in enumerate(shown)]
 
     def older(hidden, width):
-        return [(None, clip(f"… +{hidden} older", width - 2), "note")] if hidden else []
+        return [(None, clip(f"… +{hidden} older", width - 1), "note")] if hidden else []
 
     if wide:
         dw = max(24, min(60, w * 2 // 5))
         pw = w - dw - 4
         fit = len(done) if len(done) <= body else body - 1
         shown = done[::-1][:fit]
-        right = [done_row(len(todo) + n, text, dw - 1) for n, (_, text) in enumerate(shown)]
-        right += older(len(done) - fit, dw - 1)
+        right = done_rows(shown, dw - 1) + older(len(done) - fit, dw - 1)
         return todo + shown, [(1, pw, pending_rows(pw, 0)), (pw + 4, dw - 1, right)]
 
     pw = w - 2
-    left = pending_rows(pw, 0)
-    free = body - len(left) - 1
+    rows = pending_rows(pw, 0)
+    free = body - len(rows) - 1
     fit = min(len(done), max(SHOW_DONE, min(free, body // 2)))
-    shown = done[len(done) - fit:] if fit else []
-    rows = older(len(done) - fit, pw)
-    rows += [done_row(n, text, pw) for n, (_, text) in enumerate(shown)]
+    shown = done[::-1][:fit]
     if shown and todo:
         rows.append((None, "-" * min(w - 6, 40), "rule"))
-    rows += [(len(shown) + n, text, kind) for n, text, kind in left]
-    return shown + todo, [(1, pw, rows)]
+    rows += done_rows(shown, pw) + older(len(done) - fit, pw)
+    return todo + shown, [(1, pw, rows)]
 
 
 def parse(text):
@@ -193,7 +217,8 @@ class App:
         self.tops = {}       # scroll offset per panel
         self.fresh = []      # (item, when its highlight ends) for items another pane added
         self.history = []
-        self.focus = next((i for i in self.items if not i[0]), None)  # the item under the cursor
+        self.note = None     # (text, when it ends) shown in place of the footer
+        self.focus = None    # the item under the cursor; None until you move, and after Esc
 
     def layout(self):
         h, w = self.scr.getmaxyx()
@@ -205,13 +230,16 @@ class App:
 
     @property
     def cur(self):
-        return next((n for n, i in enumerate(self.view()) if i is self.focus), 0)
+        return next((n for n, i in enumerate(self.view()) if i is self.focus), None)
+
+    def first(self):
+        view = self.view()
+        return next((i for i in view if not i[0]), view[0] if view else None)
 
     def point(self):
-        """Keep the cursor on a visible item: the first pending one when its own went out of view."""
-        view = self.view()
-        if not any(i is self.focus for i in view):
-            self.focus = next((i for i in view if not i[0]), view[0] if view else None)
+        """Keep a selection on a visible item: the first pending one when its own went out of view."""
+        if self.focus is not None and self.cur is None:
+            self.focus = self.first()
 
     def load(self, text):
         """Take the list from text, keeping the cursor on the same item and flagging what is new."""
@@ -223,7 +251,8 @@ class App:
                 old.remove(item)
             else:
                 self.fresh.append((item, until))
-        self.focus = next((i for i in self.items if i == self.focus), None)
+        if self.focus is not None:
+            self.focus = next((i for i in self.items if i == self.focus), None) or self.first()
         self.point()
 
     def reload(self):
@@ -245,17 +274,35 @@ class App:
         self.focus = target
         self.point()
 
-    # actions (each fn finds the list empty when another pane cleared it meanwhile)
+    # actions (each fn finds its item gone, cur None, when another pane removed it meanwhile;
+    # the ones that act on the item under the cursor do nothing while nothing is selected)
+
+    def unselect(self):
+        self.focus = None
+
+    def say(self, text):
+        self.note = (text, time.monotonic() + NOTE)
+
+    def copy(self):
+        if self.cur is None:
+            self.say("select an item to copy")
+        else:
+            self.say("copied" if clipboard(self.focus[1]) else "could not copy")
 
     def step(self, delta):
-        view = self.view()
-        if view:
-            self.focus = view[max(0, min(self.cur + delta, len(view) - 1))]
+        view, cur = self.view(), self.cur
+        if cur is None:
+            self.focus = self.first()
+        elif view:
+            self.focus = view[max(0, min(cur + delta, len(view) - 1))]
 
     def jump(self):
         """Go to the nearest item of the other kind: the other column when wide."""
         view, cur = self.view(), self.cur
-        others = [n for n, i in enumerate(view) if view and i[0] != view[cur][0]]
+        if cur is None:
+            self.focus = next((i for i in view if i[0]), self.first())
+            return
+        others = [n for n, i in enumerate(view) if i[0] != view[cur][0]]
         if others:
             self.focus = view[min(others, key=lambda n: abs(n - cur))]
 
@@ -263,23 +310,26 @@ class App:
         text = self.ask("add: ")
         if text:
             item = [False, text]
-            self.change(lambda items, view: items.append(item) or item)
+            keep = self.focus is not None
+            self.change(lambda items, view: items.append(item) or (item if keep else None))
 
     def edit(self):
-        if not self.view():
+        if self.cur is None:
             return
-        text = self.ask("edit: ", self.view()[self.cur][1])
+        text = self.ask("edit: ", self.focus[1])
         if text:
             def fn(items, view):
-                if not view:
+                if self.cur is None:
                     return None
                 view[self.cur][1] = text
                 return view[self.cur]
             self.change(fn)
 
     def toggle(self):
+        if self.cur is None:
+            return
         def fn(items, view):
-            if not view:
+            if self.cur is None:
                 return None
             item = view[self.cur]
             same = [i for i in view if i[0] == item[0]]
@@ -293,8 +343,10 @@ class App:
         self.change(fn)
 
     def move(self, step):
+        if self.cur is None:
+            return
         def fn(items, view):
-            if not view:
+            if self.cur is None:
                 return None
             item, j = view[self.cur], self.cur + step
             if 0 <= j < len(view) and view[j][0] == item[0]:
@@ -305,8 +357,10 @@ class App:
         self.change(fn)
 
     def delete(self):
+        if self.cur is None:
+            return
         def fn(items, view):
-            if not view:
+            if self.cur is None:
                 return None
             take(items, view[self.cur])
             rest = view[:self.cur] + view[self.cur + 1:]
@@ -345,7 +399,7 @@ class App:
         self.fresh = [(i, t) for i, t in self.fresh if t > now]
         body = max(h - 3, 1)
         for p, (x, width, rows) in enumerate(panels):
-            mine = [r for r, row in enumerate(rows) if row[0] == cur]
+            mine = [r for r, row in enumerate(rows) if cur is not None and row[0] == cur]
             top = self.tops.get(p, 0)
             if mine:
                 top = max(min(top, mine[0]), mine[-1] - body + 1)
@@ -355,13 +409,16 @@ class App:
                 attr = curses.A_NORMAL if kind == "todo" else curses.A_DIM
                 if n is not None and any(i is view[n] for i, _ in self.fresh):
                     attr = curses.A_BOLD | curses.A_UNDERLINE
-                self.put(2 + y, x, ("> " if here else "  ") + text, attr | (curses.A_REVERSE if here else 0))
+                self.put(2 + y, x, text, attr | (curses.A_REVERSE if here else 0))
         if len(panels) > 1:
             for y in range(2, 2 + body):
                 self.put(y, panels[1][0] - 2, "│", curses.A_DIM)
         if not view:
-            self.put(2, 3, "nothing yet: press a to add", curses.A_DIM)
-        self.put(h - 1, 1, footer(w), curses.A_DIM)
+            self.put(2, 1, "nothing yet: press a to add", curses.A_DIM)
+        if self.note and self.note[1] > now:
+            self.put(h - 1, 1, self.note[0], curses.A_BOLD)
+        else:
+            self.put(h - 1, 1, footer(w), curses.A_DIM)
 
     def ask(self, label, text=""):
         buf = list(text)
@@ -411,6 +468,8 @@ class App:
                 continue
             if key == "q":
                 return
+            elif key == "\x1b":
+                self.unselect()
             elif key in ("j", curses.KEY_DOWN):
                 self.step(1)
             elif key in ("k", curses.KEY_UP):
@@ -423,6 +482,8 @@ class App:
                 self.edit()
             elif key in ("x", " "):
                 self.toggle()
+            elif key == "y":
+                self.copy()
             elif key == "J":
                 self.move(1)
             elif key == "K":
