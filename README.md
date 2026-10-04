@@ -7,23 +7,26 @@ while it works.
 ```
  next: my-project  (3 to do, 12 done)
 
- then: update the README
- check the error path when the file is
-   missing
- added from another pane
+ [ ] then: update the README
+ [ ] check the error path when the file
+     is missing
+ [ ] added from another pane
  ---------------------------------------
- review the migration it wrote
- ask it to add tests for the parser
- wire the config loader
+ [x] review the migration it wrote
+ [x] ask it to add tests for the parser
+ [x] wire the config loader
  … +9 older
 
  a e x y J K tab d u esc q
 ```
 
 Pending items come first, the next one on top. Done items sit below the line, dimmed,
-newest first. Rows carry only the item's text, so what you copy from the pane is the item; `y` copies
-the selected item whole, without the wrapping, through `pbcopy`, `wl-copy`, `xclip` or `xsel`,
-or the terminal's OSC 52 escape when none is there (that one works over SSH too).
+newest first. The cursor is only a highlight, never a marker in the text. `y` copies the
+selected item as plain text, without its `[ ]` and without the wrapping. It fills this
+machine's clipboard through `pbcopy`, `wl-copy`, `xclip` or `xsel`, and always sends the
+OSC 52 escape too, so the terminal you are looking at fills its own: that is what makes it
+work in a remote pane (SSH, `herdr --remote`), where the clipboard you paste from is on
+another machine.
 
 In a wide pane (a split below the agent, say) the done items move to their own column on
 the right, newest on top, and the pending ones get the left:
@@ -31,11 +34,11 @@ the right, newest on top, and the pending ones get the left:
 ```
  next: my-project  (3 to do, 12 done)
 
- then: update the README                       │ review the migration it wrote
- check the error path when the file is         │ ask it to add tests for the parser
-   missing                                     │ wire the config loader
- added from another pane                       │ … +9 older
- a add  e edit  x done  y copy  J/K move  tab col  d delete  u undo  esc unselect  q quit
+ [ ] then: update the README                   │ [x] review the migration it wrote
+ [ ] check the error path when the file is     │ [x] ask it to add tests for the parser
+     missing                                   │ [x] wire the config loader
+ [ ] added from another pane                   │ … +9 older
+ a add  e edit  x done  y copy  J/K move  tab col  d delete  u undo  esc deselect  q quit
 ```
 
 - **Scoped to the folder.** Inside a git repo the list belongs to the repo root, so every
@@ -45,10 +48,24 @@ the right, newest on top, and the pending ones get the left:
 - **Fits the pane on its own.** Tall: pending on top, done items below them, newest first,
   filling the free rows (at least 3, at most half the pane), with `… +N older` for the rest. Wide (70 or more
   columns and more than twice as wide as tall): pending on the left, done on the right. The
-  switch has a few columns of slack, so dragging a split doesn't flicker; the footer shortens
-  in narrow panes.
+  switch has a few columns of slack, so dragging a split doesn't flicker.
+- **Explains its keys while there is room.** In a narrow pane the keys sit at the bottom in
+  an aligned grid with what they do. When the list needs those rows, they fold into one line
+  of letters (`a e x y d u q`):
+
+  ```
+     a add         e edit
+     x done        y copy
+   J/K move      tab col
+     d delete      u undo
+   esc deselect    q quit
+  ```
 - **Selects nothing until you move.** The cursor shows up on `j`/`k`, the arrows or `Tab`;
   `Esc` takes it away again, so the pane stays clean to read and copy from.
+- **Wears your terminal's colors.** It uses the 16 ANSI slots only, never RGB values, so
+  the theme you set in the terminal (or the multiplexer) colors it: the selection is a bar
+  in color 0 with the box in yellow, done items in bright black, new arrivals in green. With
+  fewer than 16 colors it falls back to dim and reverse video.
 - **Shows what arrived.** An item added from another pane is highlighted for a few seconds.
 - **Nothing is lost.** The file keeps every item forever, newest first.
 - **No dependencies.** One Python 3 file using the standard library's `curses`
@@ -81,7 +98,7 @@ next --path       # print the file that holds this folder's list
 | `a` | add an item at the bottom (the furthest future) |
 | `e` or `Enter` | edit the item under the cursor |
 | `x` or `Space` | mark done; on a done item, reopen it on top of the pending ones |
-| `y` | copy the item, whole and unwrapped, to the clipboard |
+| `y` | copy the item's text to the clipboard: no `[ ]`, no wrapping |
 | `J` / `K` | move the item down / up |
 | `Tab`, `h` / `l` or arrows | jump to the other column (to the done or pending items in a tall pane) |
 | `j` / `k` or arrows | move the cursor (the first move selects the next pending item) |

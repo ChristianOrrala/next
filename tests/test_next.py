@@ -50,30 +50,67 @@ class Mode(unittest.TestCase):
 
 
 class Clipboard(unittest.TestCase):
-    def test_uses_the_first_tool_found_and_falls_back_to_osc52(self):
+    def test_runs_the_tool_and_always_sends_osc52(self):
+        # the tool fills this machine's clipboard; OSC 52 reaches the terminal you look at,
+        # which is another machine's when the pane is remote (ssh, herdr --remote)
         runs, out = [], []
         real = nx.shutil.which, nx.subprocess.run, nx.sys.stdout
         class Out:
             def write(self, s): out.append(s)
             def flush(self): pass
         try:
+            nx.sys.stdout = Out()
             nx.shutil.which = lambda name: "/bin/" + name if name == "pbcopy" else None
             nx.subprocess.run = lambda cmd, **kw: runs.append((cmd, kw["input"]))
             self.assertTrue(nx.clipboard("hi"))
             self.assertEqual(runs, [(["pbcopy"], "hi")])
-            nx.shutil.which = lambda name: None
-            nx.sys.stdout = Out()
-            self.assertTrue(nx.clipboard("hi"))
             self.assertEqual(out, ["\x1b]52;c;aGk=\a"])
+            nx.shutil.which = lambda name: None
+            self.assertTrue(nx.clipboard("hi"))
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(len(out), 2)
         finally:
             nx.shutil.which, nx.subprocess.run, nx.sys.stdout = real
+
+
+def grid_text(row):
+    line = ""
+    for x, key, what in row:
+        line = line.ljust(x) + (f"{key} {what}" if key else what)
+    return line
+
+
+class Keys(unittest.TestCase):
+    def test_spelled_out_keys_form_an_aligned_grid(self):
+        grid = nx.key_grid(24)
+        self.assertEqual([grid_text(r) for r in grid], [
+            "  a add         e edit",
+            "  x done        y copy",
+            "J/K move      tab col",
+            "  d delete      u undo",
+            "esc deselect    q quit",
+        ])
+        self.assertEqual([(k, d) for row in grid for _, k, d in row], nx.KEYMAP)
+
+    def test_one_row_when_wide_and_none_when_too_narrow(self):
+        self.assertEqual(len(nx.key_grid(200)), 1)
+        self.assertEqual(nx.key_grid(12), [])
+
+
+class Header(unittest.TestCase):
+    def test_shortens_with_width(self):
+        self.assertEqual(nx.header("proj", 2, 5, 80), "next: proj  (2 to do, 5 done)")
+        self.assertEqual(nx.header("invoice-factory", 2, 0, 27), "next: invoice-factory · 2")
+        self.assertEqual(nx.header("invoice-factory", 2, 0, 21), "invoice-factory · 2")
+        self.assertLessEqual(nx.cells(nx.header("invoice-factory", 2, 0, 12)), 10)
 
 
 class Footer(unittest.TestCase):
     def test_shrinks_with_width(self):
         self.assertEqual(nx.footer(200), nx.KEYS)
         self.assertEqual(nx.footer(40), nx.SHORT_KEYS)
-        self.assertEqual(nx.footer(15), "")
+        self.assertEqual(nx.footer(22), nx.TINY_KEYS)   # a narrow side pane still gets a hint
+        self.assertEqual(nx.footer(10), "")
 
 
 class Wide(unittest.TestCase):
@@ -85,8 +122,8 @@ class Wide(unittest.TestCase):
         self.assertTrue(24 <= rw <= 60)
         self.assertLess(lx + lw, rx)
         self.assertLessEqual(rx + rw, 119)
-        self.assertEqual(texts(left), ["todo 0", "todo 1"])
-        self.assertEqual(texts(right), ["done 3", "done 2", "done 1", "done 0"])
+        self.assertEqual(texts(left), ["[ ] todo 0", "[ ] todo 1"])
+        self.assertEqual(texts(right), ["[x] done 3", "[x] done 2", "[x] done 1", "[x] done 0"])
 
     def test_done_column_fills_the_height_and_counts_the_rest(self):
         view, panels = nx.arrange(items(30, 1), 120, 12, True)
@@ -108,11 +145,12 @@ class Tall(unittest.TestCase):
         view, panels = nx.arrange(items(40, 2), 45, 50, False)
         rows = panels[0][2]
         done_rows = [r for r in rows if r[2] == "done"]
-        self.assertEqual(len(done_rows), 47 // 2)
-        self.assertEqual(texts(rows)[:2], ["todo 0", "todo 1"])
+        self.assertEqual(len(done_rows), 47 // 2 - 1)  # one row goes to the older note
+        self.assertEqual(texts(rows)[:2], ["[ ] todo 0", "[ ] todo 1"])
         self.assertEqual(rows[2][2], "rule")
-        self.assertEqual(done_rows[0][1], "done 39")
-        self.assertEqual(rows[-1][1], f"… +{40 - 47 // 2} older")
+        self.assertEqual(done_rows[0][1], "[x] done 39")
+        self.assertEqual(rows[-1][1], f"… +{40 - (47 // 2 - 1)} older")
+        self.assertLessEqual(len(rows), 47)
         self.assertEqual([t for _, t in view[:3]], ["todo 0", "todo 1", "done 39"])
 
     def test_at_least_three_done_when_full(self):
@@ -121,14 +159,14 @@ class Tall(unittest.TestCase):
 
     def test_no_older_note_when_everything_fits(self):
         _, panels = nx.arrange(items(2, 2), 45, 50, False)
-        self.assertEqual(texts(panels[0][2]), ["todo 0", "todo 1", "-" * 39, "done 1", "done 0"])
+        self.assertEqual(texts(panels[0][2]), ["[ ] todo 0", "[ ] todo 1", "-" * 39, "[x] done 1", "[x] done 0"])
 
     def test_pending_wraps_with_a_hanging_indent(self):
         _, panels = nx.arrange([[False, "word " * 20]], 30, 20, False)
         lines = texts(panels[0][2])
         self.assertGreater(len(lines), 1)
-        self.assertTrue(lines[0].startswith("word"))
-        self.assertTrue(lines[1].startswith("  word"))
+        self.assertTrue(lines[0].startswith("[ ] word"))
+        self.assertTrue(lines[1].startswith("    word"))
 
 
 class Screen:
@@ -137,6 +175,39 @@ class Screen:
 
     def getmaxyx(self):
         return self.size
+
+
+class Drawn(Screen):
+    """A screen that keeps how far the drawing on each line reaches."""
+    def __init__(self, h, w):
+        super().__init__(h, w)
+        self.erase()
+
+    def erase(self):
+        self.ends = {}
+
+    def addnstr(self, y, x, text, n, attr=0):
+        if text[:n]:
+            self.ends[y] = max(self.ends.get(y, 0), x + len(text[:n]))
+
+
+class FooterInPane(unittest.TestCase):
+    def app(self, pending):
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "list.md")
+        nx.write(path, "".join(f"- [ ] item {n}\n" for n in range(pending)))
+        return nx.App(Screen(20, 24), path, "t")
+
+    def test_spelled_out_while_the_list_has_room(self):
+        app = self.app(3)
+        app.layout()
+        self.assertEqual(app.keys, nx.key_grid(24))
+
+    def test_collapses_to_letters_when_the_list_needs_the_rows(self):
+        app = self.app(15)
+        _, panels = app.layout()
+        self.assertEqual(app.keys, [[(0, "", nx.footer(24))]])
+        self.assertLessEqual(len(panels[0][2]), 20 - 2 - 1)
 
 
 class Selection(unittest.TestCase):
@@ -181,8 +252,18 @@ class Selection(unittest.TestCase):
             app.copy()
         finally:
             nx.clipboard = real
-        self.assertEqual(copied, ["a long item that would wrap in a narrow pane"])
+        self.assertEqual(copied, ["a long item that would wrap in a narrow pane"])  # no box, no wrapping
         self.assertEqual(app.note[0], "copied")
+
+    def test_selection_is_a_full_width_bar(self):
+        app = self.app("- [ ] test\n- [ ] any providers like open router sell YOLO26 or DF-DETR?\n")
+        app.scr = Drawn(12, 24)
+        app.step(1)
+        app.draw()
+        item_rows = len(nx.wrap(app.focus[1], 22 - 5))
+        self.assertGreater(item_rows, 1)
+        self.assertEqual([app.scr.ends[2 + k] for k in range(item_rows)], [1 + 22] * item_rows)
+        self.assertEqual(app.scr.ends[2 + item_rows], 1 + len("[ ] test"))  # unselected: just its text
 
     def test_reload_keeps_nothing_selected(self):
         app = self.app()

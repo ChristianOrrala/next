@@ -13,7 +13,7 @@ pending on the left, done on the right, newest on top. The file keeps every item
 Nothing is selected until you move; Esc clears the selection.
 
 Keys: a add · e/Enter edit · x/Space done or reopen · y copy · J/K move · Tab/h/l other column ·
-      d delete · u undo · Esc unselect · q quit
+      d delete · u undo · Esc deselect · q quit
 """
 import base64
 import curses
@@ -27,12 +27,40 @@ import unicodedata
 
 SHOW_DONE = 3    # done items a tall pane keeps below the pending ones even when those fill it
 STORE = os.path.expanduser(os.environ.get("NEXT_DIR", "~/.local/share/next"))
-KEYS = "a add  e edit  x done  y copy  J/K move  tab col  d delete  u undo  esc unselect  q quit"
+KEYMAP = [("a", "add"), ("e", "edit"), ("x", "done"), ("y", "copy"), ("J/K", "move"), ("tab", "col"),
+          ("d", "delete"), ("u", "undo"), ("esc", "deselect"), ("q", "quit")]
+KEYS = "  ".join(f"{key} {what}" for key, what in KEYMAP)
 SHORT_KEYS = "a e x y J K tab d u esc q"
+TINY_KEYS = "a e x y d u q"
 WIDE_AT = 70     # columns before the done items move to their own column
 SLACK = 3        # hysteresis around the switch, so dragging a split doesn't flicker
 FRESH = 3        # seconds an item added from another pane stays highlighted
 NOTE = 1.5       # seconds a note like "copied" replaces the footer
+
+# How each part is drawn. These plain attributes serve any terminal; paint() swaps in colors
+# when it has 16, by ANSI slot only, so they come from the terminal's own palette.
+STYLE = {"text": curses.A_NORMAL, "dim": curses.A_DIM, "bar": curses.A_REVERSE,
+         "barbox": curses.A_REVERSE | curses.A_BOLD, "new": curses.A_BOLD | curses.A_UNDERLINE,
+         "note": curses.A_BOLD, "head": curses.A_BOLD}
+
+
+def paint():
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+    except curses.error:
+        return
+    if curses.COLORS < 16:
+        return
+    # (pair, foreground slot, background slot); -1 is the terminal's own default
+    for pair, fg, bg in ((1, 8, -1),    # bright black: done items, boxes, rule, footer
+                         (2, -1, 0),    # black behind the default text: the selection bar
+                         (3, 3, 0),     # yellow on that bar: the selected item's box
+                         (4, 2, -1)):   # green: what just arrived, notes
+        curses.init_pair(pair, fg, bg)
+    STYLE.update(dim=curses.color_pair(1), bar=curses.color_pair(2) | curses.A_BOLD,
+                 barbox=curses.color_pair(3) | curses.A_BOLD, new=curses.color_pair(4) | curses.A_BOLD,
+                 note=curses.color_pair(4) | curses.A_BOLD)
 
 
 def scope():
@@ -49,8 +77,10 @@ def list_file(root):
 
 
 def clipboard(text):
-    """Put text on the system clipboard: a clipboard tool when there is one, else the OSC 52
-    escape, which most terminals (and tmux with set-clipboard on) honour, over SSH too."""
+    """Put text on the clipboard twice over: a clipboard tool fills this machine's, and the OSC 52
+    escape asks the terminal you are looking at to fill its own. That one is another machine's
+    when the pane is remote (ssh, herdr --remote); most terminals and multiplexers honour it."""
+    copied = False
     tools = [("pbcopy", ["pbcopy"], True),
              ("wl-copy", ["wl-copy"], os.environ.get("WAYLAND_DISPLAY")),
              ("xclip", ["xclip", "-selection", "clipboard"], os.environ.get("DISPLAY")),
@@ -59,15 +89,17 @@ def clipboard(text):
         if usable and shutil.which(name):
             try:
                 subprocess.run(cmd, input=text, text=True, check=True, timeout=2)
-                return True
+                copied = True
+                break
             except (OSError, subprocess.SubprocessError):
                 pass
     try:
         sys.stdout.write("\x1b]52;c;" + base64.b64encode(text.encode()).decode() + "\a")
         sys.stdout.flush()
-        return True
+        copied = True
     except OSError:
-        return False
+        pass
+    return copied
 
 
 # The list in memory runs oldest to newest: every done item in the order it was done, then the pending ones.
@@ -124,31 +156,60 @@ def is_wide(w, h, was):
     return w >= WIDE_AT + slack and w > 2 * h + slack
 
 
+def header(title, todo, done, w):
+    for text in (f"next: {title}  ({todo} to do, {done} done)", f"next: {title} · {todo}",
+                 f"{title} · {todo}"):
+        if cells(text) <= w - 2:
+            return text
+    return clip(f"{title} · {todo}", w - 2)
+
+
+def key_grid(w):
+    """The keys with what they do in aligned columns, as many columns as the width takes, filled
+    row by row. Each row is a list of (offset, key, what), keys right-aligned in their column.
+    [] when not even one column fits."""
+    for cols in range(len(KEYMAP), 0, -1):
+        rows = [KEYMAP[k:k + cols] for k in range(0, len(KEYMAP), cols)]
+        kw = [max(len(row[c][0]) for row in rows if c < len(row)) for c in range(cols)]
+        ww = [max(len(row[c][1]) for row in rows if c < len(row)) for c in range(cols)]
+        if sum(kw) + sum(ww) + cols + 2 * (cols - 1) > w - 2:
+            continue
+        grid = []
+        for row in rows:
+            x, line = 0, []
+            for c, (key, what) in enumerate(row):
+                line.append((x + kw[c] - len(key), key, what))
+                x += kw[c] + 1 + ww[c] + 2
+            grid.append(line)
+        return grid
+    return []
+
+
 def footer(w):
-    return next((keys for keys in (KEYS, SHORT_KEYS) if len(keys) <= w - 2), "")
+    return next((keys for keys in (KEYS, SHORT_KEYS, TINY_KEYS) if len(keys) <= w - 2), "")
 
 
-def arrange(items, w, h, wide):
-    """Lay the list out on a w x h screen.
+def arrange(items, w, h, wide, foot=1):
+    """Lay the list out on a w x h screen whose last foot lines hold the keys.
 
     Returns (view, panels): view is the items the cursor walks, in order; each panel is
     (x, width, rows) and each row is (index in view or None, text, kind), kind one of
-    todo, done, rule, note. Rows carry the bare text, so a copied line is just the item; done
-    items take one line each, pending items wrap with a two-cell hanging indent.
+    todo, done, rule, note. Done items take one line each; pending items wrap, their later lines
+    lined up under the text. No cursor marker goes into the text; y copies the item without its box.
     """
-    body = max(h - 3, 1)
+    body = max(h - 2 - foot, 1)
     done = [i for i in items if i[0]]
     todo = [i for i in items if not i[0]]
 
     def pending_rows(width, first):
         rows = []
         for n, (_, text) in enumerate(todo):
-            for k, line in enumerate(wrap(text, max(width - 3, 4))):
-                rows.append((first + n, ("  " if k else "") + line, "todo"))
+            for k, line in enumerate(wrap(text, max(width - 5, 4))):
+                rows.append((first + n, ("    " if k else "[ ] ") + line, "todo"))
         return rows
 
     def done_rows(shown, width):
-        return [(len(todo) + n, clip(text, width - 1), "done") for n, (_, text) in enumerate(shown)]
+        return [(len(todo) + n, clip("[x] " + text, width - 1), "done") for n, (_, text) in enumerate(shown)]
 
     def older(hidden, width):
         return [(None, clip(f"… +{hidden} older", width - 1), "note")] if hidden else []
@@ -164,7 +225,8 @@ def arrange(items, w, h, wide):
     pw = w - 2
     rows = pending_rows(pw, 0)
     free = body - len(rows) - 1
-    fit = min(len(done), max(SHOW_DONE, min(free, body // 2)))
+    room = max(SHOW_DONE, min(free, body // 2))
+    fit = len(done) if len(done) <= room else max(room - 1, SHOW_DONE)  # a row for the older note
     shown = done[::-1][:fit]
     if shown and todo:
         rows.append((None, "-" * min(w - 6, 40), "rule"))
@@ -218,11 +280,21 @@ class App:
         self.fresh = []      # (item, when its highlight ends) for items another pane added
         self.history = []
         self.note = None     # (text, when it ends) shown in place of the footer
+        self.keys = []       # footer rows of (offset, key, what): the key grid, or one line of letters
         self.focus = None    # the item under the cursor; None until you move, and after Esc
 
     def layout(self):
+        """Spell the keys out under the list while it has the room; once it needs those rows,
+        give them back and keep one line of letters."""
         h, w = self.scr.getmaxyx()
         self.wide = is_wide(w, h, self.wide)
+        spelled = key_grid(w)
+        if len(spelled) > 1:
+            view, panels = arrange(self.items, w, h, self.wide, len(spelled))
+            if all(len(rows) <= h - 2 - len(spelled) for _, _, rows in panels):
+                self.keys = spelled
+                return view, panels
+        self.keys = [[(0, "", footer(w))]]
         return arrange(self.items, w, h, self.wide)
 
     def view(self):
@@ -392,12 +464,12 @@ class App:
         view, panels = self.layout()
         cur = self.cur
         todo = sum(1 for d, _ in self.items if not d)
-        head = f"next: {self.title}  ({todo} to do, {len(self.items) - todo} done)"
-        self.put(0, 1, head if cells(head) <= w - 2 else clip(f"next: {self.title}", w - 2), curses.A_BOLD)
+        self.put(0, 1, header(self.title, todo, len(self.items) - todo, w), STYLE["head"])
 
         now = time.monotonic()
         self.fresh = [(i, t) for i, t in self.fresh if t > now]
-        body = max(h - 3, 1)
+        foot = len(self.keys)
+        body = max(h - 2 - foot, 1)
         for p, (x, width, rows) in enumerate(panels):
             mine = [r for r, row in enumerate(rows) if cur is not None and row[0] == cur]
             top = self.tops.get(p, 0)
@@ -405,20 +477,28 @@ class App:
                 top = max(min(top, mine[0]), mine[-1] - body + 1)
             self.tops[p] = top = max(0, min(top, len(rows) - body))
             for y, (n, text, kind) in enumerate(rows[top:top + body]):
-                here = n is not None and n == cur
-                attr = curses.A_NORMAL if kind == "todo" else curses.A_DIM
+                box = text[:4] if text.startswith(("[ ] ", "[x] ")) else ""
+                if n is not None and n == cur:
+                    # a solid bar across the column, so a wrapped item is one clean block
+                    self.put(2 + y, x, text + " " * (width - cells(text)), STYLE["bar"])
+                    self.put(2 + y, x, box, STYLE["barbox"])
+                    continue
+                attr = STYLE["text"] if kind == "todo" else STYLE["dim"]
                 if n is not None and any(i is view[n] for i, _ in self.fresh):
-                    attr = curses.A_BOLD | curses.A_UNDERLINE
-                self.put(2 + y, x, text, attr | (curses.A_REVERSE if here else 0))
+                    attr = STYLE["new"]
+                self.put(2 + y, x, box, STYLE["dim"] if attr == STYLE["text"] else attr)
+                self.put(2 + y, x + len(box), text[len(box):], attr)
         if len(panels) > 1:
             for y in range(2, 2 + body):
-                self.put(y, panels[1][0] - 2, "│", curses.A_DIM)
+                self.put(y, panels[1][0] - 2, "│", STYLE["dim"])
         if not view:
-            self.put(2, 1, "nothing yet: press a to add", curses.A_DIM)
+            self.put(2, 1, "nothing yet: press a to add", STYLE["dim"])
+        for k, row in enumerate(self.keys):
+            for x, key, what in row:
+                self.put(h - foot + k, 1 + x, key, STYLE["text"])
+                self.put(h - foot + k, 1 + x + (len(key) + 1 if key else 0), what, STYLE["dim"])
         if self.note and self.note[1] > now:
-            self.put(h - 1, 1, self.note[0], curses.A_BOLD)
-        else:
-            self.put(h - 1, 1, footer(w), curses.A_DIM)
+            self.put(h - 1, 1, self.note[0] + " " * max(w - 2 - cells(self.note[0]), 0), STYLE["note"])
 
     def ask(self, label, text=""):
         buf = list(text)
@@ -455,10 +535,7 @@ class App:
     def run(self):
         curses.curs_set(0)
         self.scr.timeout(1000)  # wake every second to pick up `next <text>` from other panes
-        try:
-            curses.use_default_colors()
-        except curses.error:
-            pass
+        paint()
         while True:
             self.reload()
             self.draw()
