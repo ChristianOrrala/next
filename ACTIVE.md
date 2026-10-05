@@ -4,7 +4,7 @@
 
 ## Now
 
-- **Current work:** the specifications recovered from the code (UC-001 to UC-006, all Draft), waiting for their baseline review
+- **Current work:** bringing the recovered specifications to Reviewed after the baseline review: UC-001 to UC-006 Draft, UC-007 to UC-009 mapped from the split of UC-004
 - **Progress:** baseline review held 2026-10-05: fresh-context review in `docs/reviews/all-review-1.md`, 25 decisions in `docs/recovery/change-log.md`, none open
 - **Next step:** apply the map decisions (`up-4-mapping-use-cases`: split UC-004 into four, move UC-006 A3) and the review's wording warnings (`up-5-writing-use-case-specs`), so the specs can move to Reviewed
 - **Blocked by:** nothing
