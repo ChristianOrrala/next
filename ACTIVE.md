@@ -5,10 +5,10 @@
 ## Now
 
 - **Current work:** the specifications recovered from the code (UC-001 to UC-006, all Draft), waiting for their baseline review
-- **Progress:** map, entity model, six full specifications, ledger and suspect list written; checks clean; the eighth verification sample came back clean
-- **Next step:** baseline review, sitting 1 (UC-004 with UC-003), as `docs/recovery/baseline-review.md` lays out
+- **Progress:** baseline review held 2026-10-05: fresh-context review in `docs/reviews/all-review-1.md`, 25 decisions in `docs/recovery/change-log.md`, none open
+- **Next step:** apply the map decisions (`up-4-mapping-use-cases`: split UC-004 into four, move UC-006 A3) and the review's wording warnings (`up-5-writing-use-case-specs`), so the specs can move to Reviewed
 - **Blocked by:** nothing
-- **Waiting on owner:** the baseline review (21 suspects to decide, `docs/recovery/suspects.md`), and whether to give AB-001 to AB-006 their `Specs` lines now or after the review
+- **Waiting on owner:** nothing until the specs are Reviewed; then the Approved signature on each Status line, and whether to give AB-001 to AB-006 their `Specs` lines
 - **Restart:** `python3 tools/specs/workflow_state.py`, then open `docs/recovery/baseline-review.md`
 - **Plan:** none
 - **Updated:** 2026-10-05
@@ -19,7 +19,7 @@
 
 ## Debt
 
-- Deleting an item stops the program (S-010): `d` is unusable until the decided fix; the fix waits for the review and for tests that pin today's behavior.
+- Deleting an item stops the program (S-010): `d` is unusable until the fix decided in change-log entry 1, which waits for the specs to be Approved and for tests that pin today's behavior.
 
 ## Next new work
 

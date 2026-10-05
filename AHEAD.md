@@ -14,7 +14,7 @@ None yet.
 
 | ID | Title | Kind | State | Ability | Write-up |
 |---|---|---|---|---|---|
-| AH-001 | Keep `J K` in the folded key hint | idea | open | — | — |
+| AH-001 | Keep `J K` in the folded key hint | idea | approved | AB-005 | — |
 
 Kind: `idea`, `research`, `spike`, `proposal`. State: `open`, `approved`, `next`, `started`, `dropped`.
 
@@ -29,7 +29,7 @@ Below: Items, History, How to maintain this file.
 - **What:** the narrowest one-line key hint (`a e x y d u q`) drops `J K`; keep them there so reordering stays discoverable when the list is long.
 - **Why:** offered on 2026-10-03 and not built; it extends AB-005.
 - **Write-up:** none
-- **Decided:** —
+- **Decided:** approved 2026-10-05 by the owner in the baseline review (docs/recovery/change-log.md, entry 19); it extends AB-005.
 
 ## History
 
