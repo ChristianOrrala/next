@@ -1,4 +1,4 @@
-@startuml Use Cases Overview
+@startuml use_cases
 left to right direction
 
 actor "User" as user

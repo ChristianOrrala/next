@@ -1,1 +1,3 @@
 __pycache__/
+plantuml*.jar
+.syncthing.*.tmp
