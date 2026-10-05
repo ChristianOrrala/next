@@ -1,0 +1,4 @@
+#!/bin/sh
+# Checks the shape of the A-files before every commit.
+# Enable once per clone: git config core.hooksPath .githooks
+exec python3 tools/check_tracking.py
