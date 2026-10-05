@@ -45,7 +45,7 @@ None yet.
 
 - **Status:** done
 - **What it does:** add, edit, mark done, reopen, move, delete and undo from the keyboard; pending items first with the next one on top, done items kept forever; nothing selected until the cursor moves, `Esc` clears it. A paste of several lines keeps only the first.
-- **Known limits:** undo covers the last change only.
+- **Known limits:** deleting an item stops the program with an error and deletes nothing, since 2026-10-02 (docs/recovery/suspects.md, S-010); an action on an item another pane just changed lands on the next pending item (S-005); undo walks back only through the changes made from the same open list, and is lost when it closes.
 - **Next:** nothing planned
 - **Evidence:** [README.md](README.md) (the key table), [tests/test_next.py](tests/test_next.py) (`Keys`, `Selection`)
 

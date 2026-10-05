@@ -4,26 +4,26 @@
 
 ## Now
 
-- **Current work:** none
-- **Progress:** —
-- **Next step:** —
+- **Current work:** the specifications recovered from the code (UC-001 to UC-006, all Draft), waiting for their baseline review
+- **Progress:** map, entity model, six full specifications, ledger and suspect list written; checks clean; the eighth verification sample came back clean
+- **Next step:** baseline review, sitting 1 (UC-004 with UC-003), as `docs/recovery/baseline-review.md` lays out
 - **Blocked by:** nothing
-- **Waiting on owner:** nothing
-- **Restart:** `python3 -m unittest discover -s tests`, then `./next` in a side pane
+- **Waiting on owner:** the baseline review (21 suspects to decide, `docs/recovery/suspects.md`), and whether to give AB-001 to AB-006 their `Specs` lines now or after the review
+- **Restart:** `python3 tools/specs/workflow_state.py`, then open `docs/recovery/baseline-review.md`
 - **Plan:** none
-- **Updated:** 2026-10-04
+- **Updated:** 2026-10-05
 
 ## Pending
 
-- none
+- [ ] Prove the agent hooks in a new session and add the `**Hooks:**` line to `AGENTS.md` (the specification check has not yet been seen blocking)
 
 ## Debt
 
-- none known
+- Deleting an item stops the program (S-010): `d` is unusable until the decided fix; the fix waits for the review and for tests that pin today's behavior.
 
 ## Next new work
 
-none: AHEAD's Next up is empty
+none: the current work is not finished
 
 Below: How to maintain this file.
 

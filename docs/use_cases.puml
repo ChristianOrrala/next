@@ -1,0 +1,26 @@
+@startuml Use Cases Overview
+left to right direction
+
+actor "User" as user
+actor "Local Clipboard" as localclip
+actor "Viewing Terminal" as viewterm
+
+rectangle "next" {
+    usecase "UC-001\nNote Next Item" as UC001
+    usecase "UC-002\nWatch the List" as UC002
+    usecase "UC-003\nComplete Item" as UC003
+    usecase "UC-004\nManage Items" as UC004
+    usecase "UC-005\nCopy Item" as UC005
+    usecase "UC-006\nLocate the List" as UC006
+}
+
+user --> UC001
+user --> UC002
+user --> UC003
+user --> UC004
+user --> UC005
+user --> UC006
+UC005 --> localclip
+UC005 --> viewterm
+
+@enduml
