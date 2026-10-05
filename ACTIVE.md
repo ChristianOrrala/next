@@ -6,10 +6,10 @@
 
 - **Current work:** bringing the recovered specifications to Reviewed after the baseline review: UC-001 to UC-009, all Draft
 - **Progress:** baseline review held 2026-10-05: fresh-context review in `docs/reviews/all-review-1.md`, 25 decisions in `docs/recovery/change-log.md`, none open
-- **Next step:** a second fresh-context review of all nine specifications (`up-6-reviewing-specifications`); when it is clean, they move to Reviewed
+- **Next step:** run the second fresh-context review of all nine specifications (`up-6-reviewing-specifications`, routed with `railhand route --stage adhoc`); the run of 2026-10-05 was stopped before it wrote a report. When it is clean, the nine move to Reviewed
 - **Blocked by:** nothing
 - **Waiting on owner:** nothing until the specs are Reviewed; then the Approved signature on each Status line, and whether to give AB-001 to AB-006 their `Specs` lines
-- **Restart:** `python3 tools/specs/workflow_state.py`, then open `docs/recovery/baseline-review.md`
+- **Restart:** `python3 tools/specs/workflow_state.py`, then read `docs/reviews/all-review-1.md` and `docs/recovery/change-log.md`
 - **Plan:** none
 - **Updated:** 2026-10-05
 
