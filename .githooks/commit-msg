@@ -1,0 +1,7 @@
+#!/bin/sh
+# Spec-first guard, warn only: flags behavior code (the `next` script) committed
+# without a specification change or a "No behavior change: UC-xxx" line. Never blocks.
+if [ -f tools/specs/spec_first_guard.py ]; then
+  python3 tools/specs/spec_first_guard.py --staged --message-file "$1" --code next --mode warn
+fi
+exit 0

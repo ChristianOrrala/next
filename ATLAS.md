@@ -13,6 +13,7 @@
 | Clipboard | Copies an item through the local tool and OSC 52 | `next` (`clipboard`) | `pbcopy`, `wl-copy`, `xclip` or `xsel` when present | `tests/test_next.py` (`Clipboard`) |
 | Docs | The user guide and the changelog | `README.md`, `CHANGELOG.md` | — | review |
 | Tracking | The A-files and their shape check | `AGENTS.md`, `tools/check_tracking.py`, `.githooks/pre-commit` | — | `tools/check_tracking.py` |
+| Specifications | What the system does, written before it is built | `docs/vision.md`, `docs/use_cases/`, `docs/test_cases/` | — | the validator and the lint of the specification skills |
 
 ## Flow
 
