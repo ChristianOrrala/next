@@ -21,7 +21,7 @@
 2. User asks to copy it.
 3. System gives the item's text to the Local Clipboard of the machine the list runs on (BR-001).
 4. System asks the Viewing Terminal to put the same text on its own clipboard (BR-002).
-5. System confirms for a moment that the item was copied.
+5. System confirms that the item was copied, for one and a half seconds on the bottom line.
 
 ## Alternative Flows
 
@@ -42,10 +42,10 @@
 
 ### A3: Nothing Could Be Asked
 
-**Trigger:** The request to the Viewing Terminal cannot be sent and the Local Clipboard was not reached (step 5)  
+**Trigger:** The request to the Viewing Terminal cannot be sent and the Local Clipboard was not reached (step 4)  
 **Flow:**
 
-1. System tells the user for a moment that it could not copy.
+1. System tells the user that it could not copy, for one and a half seconds on the bottom line.
 2. Use case ends.
 
 ### A4: The Viewing Terminal Ignores the Request
@@ -58,7 +58,7 @@
 
 ### A5: Text the Language Setting Cannot Carry
 
-**Trigger:** The pane's language setting cannot write a character of the item's text for the Local Clipboard (step 3)  
+**Trigger:** The terminal's language and region setting cannot write a character of the item's text for the Local Clipboard (step 3)  
 **Flow:**
 
 1. System stops with an error (S-022).
@@ -68,7 +68,7 @@
 
 ### Success Postconditions
 
-- The item's text is on the clipboard of this machine, of the terminal the user is looking at, or both. The list is unchanged.
+- The item's text is on the clipboard of this machine, of the terminal the user is looking at, or both. The list is unchanged. In A4, when no local clipboard was reached, the text may be on no clipboard although the user is told it was copied (S-006).
 
 ### Failure Postconditions
 

@@ -26,12 +26,13 @@
 
 ### A1: Reopen a Done Item
 
-**Trigger:** The selected item is done (step 2)  
+**Trigger:** The user selects a done item instead (step 1)  
 **Flow:**
 
-1. System makes the item pending again, as the next item to do (BR-003).
-2. System saves the list at once and keeps the item selected.
-3. Use case ends.
+1. User marks it.
+2. System makes the item pending again, as the next item to do (BR-003).
+3. System saves the list at once and keeps the item selected.
+4. Use case ends.
 
 ### A2: Nothing Selected
 
@@ -54,7 +55,23 @@
 **Trigger:** No other pending item is left (step 5)  
 **Flow:**
 
-1. System keeps the selection on the item just done (BR-002).
+1. System keeps the selection on the item just done, unless the pane is too short to show it (BR-002).
+2. Use case ends.
+
+### A5: Done Item Changed Elsewhere Meanwhile
+
+**Trigger:** Another pane changed or removed the selected done item since the list last showed it (A1 step 1)  
+**Flow:**
+
+1. System marks the next pending item done instead of reopening the one the user chose, and saves the list (S-005).
+2. Use case ends.
+
+### A6: Save Fails
+
+**Trigger:** The list cannot be saved (step 4)  
+**Flow:**
+
+1. System stops with an error and closes the list; the list's file keeps its earlier content.
 2. Use case ends.
 
 ## Postconditions
@@ -66,7 +83,7 @@
 
 ### Failure Postconditions
 
-- The list is unchanged, except in A3, where the change falls on another item (S-005).
+- The list is unchanged, except in A3 and A5, where the change falls on another item (S-005).
 
 ## Business Rules
 

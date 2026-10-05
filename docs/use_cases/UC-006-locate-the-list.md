@@ -16,9 +16,9 @@
 
 ## Main Success Scenario
 
-1. User asks where the folder's list is kept.
+1. User asks where the folder's list is kept, with the word --path.
 2. System finds the folder's list (UC-002 BR-001).
-3. System answers with the location of the file that holds it (BR-001).
+3. System answers with the location of the file that holds it, a plain text file the user can read and edit (BR-001, BR-002).
 
 ## Alternative Flows
 
@@ -38,18 +38,13 @@
 1. System answers with the location inside that place, read as given: an empty or relative place is not made absolute, so the list can land inside the folder and adding can fail (BR-001, S-021).
 2. Use case ends.
 
-### A3: The File Edited by Hand
+### A3: Retired, moved to UC-002 BR-011
 
-**Trigger:** The user edits the file at that location by hand (step 3)  
-**Flow:**
-
-1. System reads the items from the edited file the next time the list is shown or changed, in the form of BR-002; a first line that starts with a byte-order mark is not read as an item (S-013), and a file that is not readable as text stops the list with an error (S-014).
-2. System drops every line that is not an item the next time the list changes (S-008).
-3. Use case ends.
+Moved when the review found it describes what happens after this use case ends: reading a file edited by hand is now UC-002 BR-011, and the file's form stays BR-002.
 
 ### A4: Unsupported Language Setting
 
-**Trigger:** The machine does not support the language setting the pane passes on (step 1)  
+**Trigger:** The machine does not support the language and region setting the terminal passes on (step 1)  
 **Flow:**
 
 1. System stops with an error and answers nothing (S-020).
@@ -69,10 +64,10 @@
 
 ### BR-001: Lists Live Outside the Folder
 
-Every list is kept in one place of the user's own, outside the folder it belongs to, so it never shows among the folder's files, unless the chosen place is given relative to the folder or lies inside it, or the folder is the user's home folder or another folder that contains the place (S-021). Each folder's list is a file named after the folder's full location; the user may choose that place. Two folders whose locations read the same once separators become dashes share one file (S-007), and a folder whose location is too long to name a file after cannot keep a list (S-012).
-Examples: the list of a repository never appears among the repository's changes. The folders a/b-c and a-b/c share one list.
+Every list is kept in one place of the user's own, outside the folder it belongs to, so it never shows among the folder's files, unless the chosen place is given relative to the folder or lies inside it, or the folder is the user's home folder or another folder that contains the place (S-021). The place is the folder .local/share/next in the user's home folder, or the one the user names in the setting NEXT_DIR. Each folder's list is a file in that place named after the folder's full location, without its leading separator, each separator turned into a dash, with .md at the end; the top folder of the machine gives root.md. Two folders whose locations read the same once separators become dashes share one file (S-007), and a folder whose location is longer than 249 characters cannot keep a list (S-012).
+Examples: the folder /home/ana/app keeps its list in home-ana-app.md. The list of a repository never appears among the repository's changes. The folders a/b-c and a-b/c share one list.
 
 ### BR-002: The List Is Plain Text, Newest First
 
-The file holds one item per line, each marked as pending or done, pending items first from the one added last down to the next one, then done items newest first.
+The file holds one item per line, pending items first from the one added last down to the next one, then done items newest first. A pending item's line starts with a dash, a space and an open box, [ ] and a space; a done item's line with [x] or [X] in its place. The text follows on the same line.
 Examples: pending A then B added, X done: the file reads B, A, then X, each with its mark. A line marked done in capitals counts as done.

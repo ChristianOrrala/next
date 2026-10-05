@@ -4,9 +4,9 @@
 
 ## Now
 
-- **Current work:** bringing the recovered specifications to Reviewed after the baseline review: UC-001 to UC-006 Draft, UC-007 to UC-009 mapped from the split of UC-004
+- **Current work:** bringing the recovered specifications to Reviewed after the baseline review: UC-001 to UC-009, all Draft
 - **Progress:** baseline review held 2026-10-05: fresh-context review in `docs/reviews/all-review-1.md`, 25 decisions in `docs/recovery/change-log.md`, none open
-- **Next step:** apply the map decisions (`up-4-mapping-use-cases`: split UC-004 into four, move UC-006 A3) and the review's wording warnings (`up-5-writing-use-case-specs`), so the specs can move to Reviewed
+- **Next step:** a second fresh-context review of all nine specifications (`up-6-reviewing-specifications`); when it is clean, they move to Reviewed
 - **Blocked by:** nothing
 - **Waiting on owner:** nothing until the specs are Reviewed; then the Approved signature on each Status line, and whether to give AB-001 to AB-006 their `Specs` lines
 - **Restart:** `python3 tools/specs/workflow_state.py`, then open `docs/recovery/baseline-review.md`

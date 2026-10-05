@@ -44,6 +44,7 @@ or flow it affects. Write no counts here: the ledger check prints them.
 | UC-002 A10 | next:326; next:327; next:313; next:314 | recovered | falls back to the first item shown; S-017 for twins |
 | UC-002 A11 | next:220; next:222; next:494 | suspect | S-016 |
 | UC-002 A12 | next:575 | suspect | S-020 |
+| UC-002 A13 | next:540; next:331; next:254; next:255 | suspect | S-014 |
 | UC-002 BR-001 | next:68; next:70; next:72 | suspect | S-018; git top level of the working tree, else the working folder |
 | UC-002 BR-002 | next:160; next:161; next:164 | recovered |  |
 | UC-002 BR-003 | next:207; next:208; next:134 | recovered | continuation lines indented four columns; runs of spaces shown as one |
@@ -59,27 +60,38 @@ or flow it affects. Write no counts here: the ledger check prints them.
 | UC-003 A2 | next:401 | verified | tests/test_next.py:236 |
 | UC-003 A3 | next:337; next:327; next:309; next:404 | suspect | S-005; next:404 guards only an empty view |
 | UC-003 A4 | next:409; next:414 | verified | |
+| UC-003 A5 | next:337; next:327; next:309 | suspect | S-005; from a done item, the next pending item is marked done |
+| UC-003 A6 | next:344; next:262 | recovered | the save raises and nothing catches it |
 | UC-003 Post-F-1 | next:401; next:342; next:344; next:264 | verified | nothing selected returns before any change; the save happens only if the rendered list differs and replaces the file whole; A3 (S-005) is the exception |
 | UC-003 BR-001 | next:413 | verified | inserted just after the last done item |
 | UC-003 BR-002 | next:409; next:414; next:200; next:220; next:347 | suspect | S-016 |
 | UC-003 BR-003 | next:413 | verified | inserted just before the first pending item |
-| UC-004 | next:388; next:417; next:431; next:442 | recovered | e or Enter, J and K, d or Delete, u |
+| UC-004 | next:388; next:558 | recovered | e or Enter |
 | UC-004 A1 | next:520; next:392 | verified |  |
 | UC-004 A2 | next:519; next:392 | recovered | |
 | UC-004 A3 | next:518 | suspect | S-019 |
 | UC-004 A4 | next:327; next:309; next:396 | suspect | S-005 |
-| UC-004 A5 | next:424; next:427 | verified | |
-| UC-004 A6 | next:327; next:309; next:423 | suspect | S-005 |
-| UC-004 A7 | next:424 | verified | only the shown items count |
-| UC-004 A8 | next:437; next:438 | suspect | S-010; the selection rule at next:439 is never reached |
-| UC-004 A9 | next:444; next:445 | suspect | S-004 |
-| UC-004 A10 | next:443 | verified | |
-| UC-004 A11 | next:389; next:418; next:432 | verified | tests/test_next.py:236 |
-| UC-004 Post-F-1 | next:437; next:438; next:344 | suspect | S-010; the abort at next:438 comes before the save, so the file is untouched; S-005 for A4 and A6 |
+| UC-007 | next:417; next:424; next:427; next:564; next:566 | verified | J and K |
+| UC-007 A3 | next:418 | recovered | |
+| UC-007 A4 | next:344; next:262 | recovered | the save raises and nothing catches it |
+| UC-007 A1 | next:327; next:309; next:423 | suspect | S-005 |
+| UC-007 A2 | next:424 | verified | only the shown items count |
+| UC-008 A1 | next:437; next:438 | suspect | S-010; the selection rule at next:439 is never reached |
+| UC-008 | next:431; next:568 | recovered | d or Delete |
+| UC-008 A2 | next:432 | recovered | |
+| UC-008 BR-002 | next:439 | suspect | S-010; never reached |
+| UC-009 | next:442; next:444; next:445; next:570 | suspect | u; S-004 |
+| UC-009 A1 | next:443 | verified |  |
+| UC-009 A2 | next:326; next:327; next:309 | recovered | |
+| UC-009 A3 | next:445; next:262 | recovered | the save raises and nothing catches it |
+| UC-009 BR-002 | next:326; next:327; next:309 | suspect | S-017 |
+| UC-004 A11 | next:389 | verified | tests/test_next.py:236 |
+| UC-004 A12 | next:344; next:262 | recovered | the save raises and nothing catches it (next:594) |
+| UC-004 Post-F-1 | next:389; next:342; next:344 | recovered | the save happens only if the list changed; S-005 for A4 |
 | UC-004 BR-001 | next:519; next:392 | verified | |
-| UC-004 BR-002 | next:424; next:427 | verified | only the shown items count |
-| UC-004 BR-003 | next:437; next:438; README.md:70; next:12 | suspect | S-009, S-010 |
-| UC-004 BR-004 | next:343; next:444; next:281 | recovered | history kept in memory only |
+| UC-007 BR-001 | next:424; next:427 | verified | only the shown items count |
+| UC-008 BR-001 | next:437; next:438; README.md:70; next:12 | suspect | S-009, S-010 |
+| UC-009 BR-001 | next:343; next:444; next:281 | recovered | history kept in memory only |
 | UC-005 | next:358; next:562 | recovered | y |
 | UC-005 A1 | next:359; next:360 | verified |  |
 | UC-005 A2 | next:89; next:94 | verified | pbcopy, then wl-copy under Wayland, then xclip or xsel under X; 2 second limit per tool |
@@ -92,7 +104,7 @@ or flow it affects. Write no counts here: the ledger check prints them.
 | UC-006 | next:581; next:582 | recovered | `next --path` |
 | UC-006 A1 | next:582 | verified | prints without creating |
 | UC-006 A2 | next:29; next:76; next:260 | suspect | S-021; NEXT_DIR, default ~/.local/share/next, never made absolute |
-| UC-006 A3 | next:239; next:244; next:253; next:254 | suspect | S-008, S-013, S-014 |
+| UC-002 BR-011 | next:331; next:239; next:244; next:253 | suspect | S-008, S-013 |
 | UC-006 A4 | next:575 | suspect | S-020 |
 | UC-006 Post-S-1 | next:581; next:582; next:583 | verified | returns before any write |
 | UC-006 Post-F-1 | next:581; next:582; next:583 | verified | returns before any write; nothing before it writes |
@@ -106,4 +118,4 @@ or flow it affects. Write no counts here: the ledger check prints them.
 | ENTITY ITEM lifecycle | next:411 | verified | Pending and Done, flipped by marking |
 | Length of item text | next:238; next:585 | suspect | S-011 |
 | ESCDELAY set to 25 | next:591 | discarded | a terminal timing so Esc answers at once; no business meaning |
-| Note shown for 1.5 seconds | next:38 | discarded | screen timing of the copy confirmation |
+| Note shown for 1.5 seconds | next:38; next:501 | recovered | now stated in UC-005 step 5 and A3 |

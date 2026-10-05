@@ -18,21 +18,21 @@
 
 1. User opens the list in a pane while working in a folder.
 2. System finds the folder's list (BR-001).
-3. System shows the list's title with how many items are to do and how many are done, in the terminal's own colors (BR-002, BR-010).
+3. System shows a title naming the program and the list, with how many items are to do and how many are done, in the terminal's own colors (BR-002, BR-010).
 4. System shows the pending items in their order, the next one first, each one whole (BR-003).
 5. System shows the done items below them, newest first, as many as the pane has room for (BR-004, BR-005).
-6. System shows the keys and what each one does (BR-006).
-7. System keeps the list open and shows every change made to it from elsewhere as it happens, marking the items that just arrived (BR-007).
+6. System shows the keys and what each one does, below the list (BR-006).
+7. System keeps the list open and shows every change made to its file from elsewhere, by another pane or by hand, as it happens, marking the items that just arrived (BR-007, BR-011).
 8. User closes the list.
 
 ## Alternative Flows
 
 ### A1: Empty List
 
-**Trigger:** The list has no items, or the folder has no list yet (step 4)  
+**Trigger:** Nothing is shown in the list area: the list has no items, or the folder has no list yet (step 4)  
 **Flow:**
 
-1. System tells the user there is nothing yet and how to add the first item.
+1. System tells the user there is nothing yet and that the add key adds the first item; a tall pane holding only done items shows them instead.
 2. Use case continues at step 6.
 
 ### A2: Wide Pane
@@ -82,7 +82,7 @@
 **Trigger:** The user asks for the other kind of item (step 7)  
 **Flow:**
 
-1. System selects the nearest item of the other kind: a done item from a pending one, a pending item from a done one; with nothing selected, the newest done item shown, or the next pending item when no done item is shown (BR-009).
+1. System selects an item of the other kind: from a pending item, the newest done item shown; from a done item, the pending item nearest it in the list, which is the last pending item; with nothing selected, the newest done item shown, or the next pending item when no done item is shown (BR-009).
 2. Use case continues at step 7.
 
 ### A8: Selection Cleared
@@ -119,10 +119,18 @@
 
 ### A12: Unsupported Language Setting
 
-**Trigger:** The machine does not support the language setting the pane passes on (step 1)  
+**Trigger:** The machine does not support the language and region setting the terminal passes on (step 1)  
 **Flow:**
 
 1. System stops with an error (S-020).
+2. Use case ends.
+
+### A13: List File Becomes Unreadable
+
+**Trigger:** The list's file is no longer readable as text when the open list refreshes it (step 7)  
+**Flow:**
+
+1. System stops with an error (S-014).
 2. Use case ends.
 
 ## Postconditions
@@ -144,8 +152,8 @@ Examples: working in the folder lib inside the repository app: the list of app. 
 
 ### BR-002: The Title Shortens With the Pane
 
-The title names the list after the last part of its folder and counts the items to do and done. As the pane narrows, it drops the done count, then the program's name, then cuts the name and the to-do count from the right with an ellipsis, so the count disappears before the name is shortened.
-Examples: a wide pane shows the name, the to-do count and the done count. A pane too narrow for that shows the name and the to-do count only. Narrower still, the name alone, then the name cut short.
+The title reads the program's name, the list's name (the last part of its folder) and how many items are to do and done. As the pane narrows, it shows the program's name, the list's name and the to-do count only; then the list's name and the to-do count; then cuts that from the right with an ellipsis, so the count disappears before the name is shortened.
+Examples: a wide pane: the program's name, the list's name, 3 to do and 12 done. A narrower pane: the program's name, the list's name and 3. Narrower still: the list's name and 3, then the list's name alone, then the name cut short.
 
 ### BR-003: Pending Items Are Shown Whole
 
@@ -159,22 +167,22 @@ Examples: a done item longer than its column ends in an ellipsis; the copied tex
 
 ### BR-005: Room for Done Items in a Tall Pane
 
-In a tall pane the done items get the rows left free below the pending ones, at least 3 and at most half of the list area. When more done items exist than that room, one row of the room says how many older ones are not shown, but at least 3 done items are kept. A line separates the pending items from the done ones when both are shown. When the pending items fill the pane, the done items and that line come after them, below the visible part, and show only when the selection moves down to them.
+The list area is the rows between the title and the keys. In a tall pane the done items get the free rows of the list area, those not taken by the pending items and the separating line, at least 3 and at most half of the list area. When more done items exist than that room, the line saying how many older ones are not shown takes one row of the room, but at least 3 done items are kept. A line separates the pending items from the done ones when both are shown. When the pending items fill the pane, the done items and that line come after them, below the visible part, and show only when the selection moves down to them.
 Examples: a list area of 20 rows, 2 pending items and 15 done: 9 done items and a line saying 6 older. The same area with pending items filling it and 5 done: 3 done items and a line saying 2 older, below the visible part. Exactly 3 done items and a full pane: all 3, with no line about older ones.
 
 ### BR-006: The Keys Are Spelled Out While There Is Room
 
-The keys and what they do are shown in aligned columns, as many columns as the width allows, while the list fits above them. When the list needs those rows, the keys fold into a single line that shortens as the pane narrows: every key with its word, then every key alone, then the keys alone without move, other kind and clear selection; and nothing when even that does not fit.
-Examples: a short list in a narrow pane: the keys in a grid. A long list in the same pane: one line of letters.
+The keys are, with their words: a add, e edit, x done, y copy, J/K move, tab col (other kind), d delete, u undo, esc deselect, q quit. They are shown in aligned columns, as many columns as the width allows, while the list fits above them. When the list needs those rows, or the keys fit on one row anyway, they fold into a single line that shortens as the pane narrows: every key with its word; then the keys alone, a e x y J K tab d u esc q; then a e x y d u q; and nothing when even that does not fit.
+Examples: a short list in a narrow pane: the keys in a grid. A long list in the same pane: one line of letters. A pane under 14 columns: no keys.
 
 ### BR-007: Changes From Elsewhere Appear on Their Own
 
-The open list shows what other panes add or change without the user doing anything, and marks items that arrived for a few seconds, or until the next change from elsewhere arrives or the user undoes a change (S-015). Opening the list marks nothing. While the user is writing an item or an edit, changes from elsewhere wait until the writing ends.
-Examples: the user adds an item from another pane: it appears in the open list, marked, within about a second. A second item arrives a moment later: only the second is marked.
+The open list shows what other panes add or change within 1 second, without the user doing anything, and marks items that arrived for 3 seconds, or until the next change from elsewhere arrives or the user undoes a change (S-015). Opening the list marks nothing, and neither does a change made from this pane. While the user is writing an item or an edit, changes from elsewhere wait until the writing ends.
+Examples: the user adds an item from another pane: it appears in the open list, marked, within 1 second, and the mark is gone 3 seconds later. A second item arrives a moment later: only the second is marked.
 
 ### BR-008: Wide Pane Layout
 
-A pane is wide when it is at least 70 columns wide and more than twice as wide as it is tall. To keep a dragged split from flickering, the layout changes only 3 columns past that line in either direction.
+A pane is wide when it is at least 70 columns wide and more than twice as wide as it is tall. To keep a dragged split from flickering, the layout changes only 3 columns past that line in either direction, on both measures. When the list opens, it counts as tall.
 Examples: a tall layout at 72 by 20 stays tall; at 73 by 20 it becomes wide. A wide layout at 67 by 20 stays wide; at 66 by 20 it becomes tall. 100 by 60 is tall, being less than twice as wide as tall.
 
 ### BR-009: Nothing Is Selected Until the User Moves
@@ -186,3 +194,8 @@ Examples: open the list and move down: the next pending item is selected. Clear 
 
 The list uses the colors of the terminal's own theme and none of its own. In a terminal with fewer than 16 colors it uses dim and reversed text instead.
 Examples: changing the terminal's theme changes the list's colors with it.
+
+### BR-011: The File Is Read as It Is
+
+The open list reads its file again whenever the file changes, edited by another pane or by hand, in the form of UC-006 BR-002. A first line that starts with a byte-order mark is not read as an item (S-013), and lines that are not items are dropped the next time the list changes (S-008).
+Examples: the user adds a line marked done to the file by hand: the open list shows it as a done item within 1 second. A heading written into the file disappears at the next change.

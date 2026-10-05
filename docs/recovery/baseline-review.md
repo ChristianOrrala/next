@@ -22,7 +22,7 @@ review settles moves to `Reviewed`; `Approved` is the owner's to write.
 
 The two use cases that change items, and the two findings that matter most.
 
-- Specifications: [UC-004](../use_cases/UC-004-manage-items.md), [UC-003](../use_cases/UC-003-complete-item.md)
+- Specifications: [UC-004](../use_cases/UC-004-edit-item.md), [UC-003](../use_cases/UC-003-complete-item.md)
 - Ledger rows: `UC-004 …` and `UC-003 …` in [ledger.md](ledger.md)
 - Suspects: S-010 (deleting stops the program), S-005 (an action on an item changed elsewhere lands on another item), S-017 (the selection jumps to an identical twin), S-004 (undo discards other panes' changes)
 - Entities: ITEM
