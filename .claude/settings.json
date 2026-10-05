@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [{"matcher": "startup|resume", "hooks": [{"type": "command",
+      "command": "cd \"$CLAUDE_PROJECT_DIR\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py session-start; fi"}]}],
+    "PostToolUse": [
+      {"matcher": "Edit", "hooks": [{"type": "command", "if": "Edit(docs/use_cases/**)",
+        "command": "cd \"$CLAUDE_PROJECT_DIR\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py after-edit 1>&2; fi"}]},
+      {"matcher": "Write", "hooks": [{"type": "command", "if": "Write(docs/use_cases/**)",
+        "command": "cd \"$CLAUDE_PROJECT_DIR\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py after-edit 1>&2; fi"}]}
+    ],
+    "Stop": [{"hooks": [{"type": "command",
+      "command": "cd \"$CLAUDE_PROJECT_DIR\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py before-stop 1>&2; fi"}]}]
+  }
+}
