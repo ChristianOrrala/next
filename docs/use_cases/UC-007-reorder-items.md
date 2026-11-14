@@ -1,14 +1,13 @@
-# Use Case: Reorder Items
-
-## Overview
-
-**Use Case ID:** UC-007  
-**Use Case Name:** Reorder Items  
-**Primary Actor:** User  
-**Goal:** The user puts an item where it belongs in the order of the list, so the next item is the one to do next.  
-**Trigger:** The user sees an item in the open list that is out of order.  
-**Status:** Draft  
-**Requirements:** none yet; there is no requirements catalog
+---
+id: UC-007
+name: Reorder Items
+primary_actor: User
+goal: The user puts an item where it belongs in the order of the list, so the next item is the one to do next.
+trigger: The user sees an item in the open list that is out of order.
+status: Draft
+requirements: []
+---
+# Reorder Items
 
 ## Preconditions
 
@@ -70,4 +69,9 @@
 ### BR-001: Items Move Among Their Own Kind
 
 An item moves one place at a time and only among the items of its own kind that are shown: a pending item among pending items, a done item among the done items shown.
-Examples: pending A, B, C; move B up: B, A, C. Move the last pending item down toward the done items: nothing changes. Move the last done item shown down while older ones are hidden: nothing changes.
+
+| items | move | result |
+|---|---|---|
+| pending A, B, C | B up | B, A, C |
+| the last pending item | down toward the done items | nothing changes |
+| the last done item shown, older ones hidden | down | nothing changes |

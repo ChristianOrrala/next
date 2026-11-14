@@ -1,14 +1,13 @@
-# Use Case: Undo Change
-
-## Overview
-
-**Use Case ID:** UC-009  
-**Use Case Name:** Undo Change  
-**Primary Actor:** User  
-**Goal:** The user takes back a change they made in the open list by mistake, so the list is as it was before it.  
-**Trigger:** The user regrets a change made from the open list.  
-**Status:** Draft  
-**Requirements:** none yet; there is no requirements catalog
+---
+id: UC-009
+name: Undo Change
+primary_actor: User
+goal: The user takes back a change they made in the open list by mistake, so the list is as it was before it.
+trigger: The user regrets a change made from the open list.
+status: Draft
+requirements: []
+---
+# Undo Change
 
 ## Preconditions
 
@@ -61,9 +60,18 @@
 ### BR-001: Undo Walks Back Through This Pane's Changes
 
 Each undo takes back one more change made from this open list, back to the moment it opened. Changes made from other panes are not undone one by one; the list put back is the whole list as it was, so what arrived from elsewhere since is lost (S-004). The undo history is lost when the list closes. A change that left the list as it was is not recorded.
-Examples: in one sitting, mark A done then edit B; undo once: B has its old text; undo again: A is pending again; undo a third time: nothing changes.
+
+| changes made in one sitting | undo | result |
+|---|---|---|
+| mark A done, then edit B | once | B has its old text |
+| mark A done, then edit B | twice | A is pending again |
+| mark A done, then edit B | a third time | nothing changes |
 
 ### BR-002: The Selection After an Undo
 
 After an undo, the selection stays on the first item with the same text and mark when the restored list holds one (S-017); otherwise the next pending item is selected, or the first item shown when none is pending. Nothing selected stays nothing selected.
-Examples: B selected, undo of marking A done: B stays selected. Nothing selected, undo: nothing selected.
+
+| selected | undo of | result |
+|---|---|---|
+| B | marking A done | B stays selected |
+| nothing | any change | nothing is selected |

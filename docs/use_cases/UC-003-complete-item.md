@@ -1,14 +1,13 @@
-# Use Case: Complete Item
-
-## Overview
-
-**Use Case ID:** UC-003  
-**Use Case Name:** Complete Item  
-**Primary Actor:** User  
-**Goal:** The user marks an item done, so it leaves the things to do and joins the record of what was done, or brings a done item back to do it next.  
-**Trigger:** The user has finished, or wants to take up again, an item in the open list.  
-**Status:** Draft  
-**Requirements:** none yet; there is no requirements catalog
+---
+id: UC-003
+name: Complete Item
+primary_actor: User
+goal: The user marks an item done, so it leaves the things to do and joins the record of what was done, or brings a done item back to do it next.
+trigger: The user has finished, or wants to take up again, an item in the open list.
+status: Draft
+requirements: []
+---
+# Complete Item
 
 ## Preconditions
 
@@ -90,14 +89,28 @@
 ### BR-001: Done Items Are Kept, Newest First
 
 A done item stays in the list as the newest done item; done items are never removed by being done, only by deleting them (UC-004 BR-003).
-Examples: done items X then Y, then A is marked done: newest first they read A, Y, X.
+
+| done items | marked done | result |
+|---|---|---|
+| X then Y | A | newest first they read A, Y, X |
+| A, Y, X | B | newest first they read B, A, Y, X |
 
 ### BR-002: The Selection Moves On
 
 After an item is marked done, the selection moves to the pending item that came after it; when it was the last pending item, to the one before it; when it was the only one, it stays on the item now done, unless the pane is too short to show that item, when nothing is selected (S-016).
-Examples: a wide pane with a single row for items and other done items, the only pending item marked done: nothing is selected. Pending A, B, C with B selected, B done: C is selected. C selected instead, C done: B is selected. Only A pending, A done: A stays selected.
+
+| pending items | selected | pane | marked done | result |
+|---|---|---|---|---|
+| A, B, C | B | any | B | C is selected |
+| A, B, C | C | any | C | B is selected |
+| A | A | shows the item now done | A | A stays selected |
+| only one | that one | wide, with a single row for items and other done items | that one | nothing is selected |
 
 ### BR-003: A Reopened Item Comes Next
 
 A done item reopened by marking it becomes the first pending item, the next one to do. An undo of the marking puts it back where it was instead (UC-004 BR-004).
-Examples: pending A, B; done X reopened: the order is X, A, B and X is next. Pending A, B, C; B marked done, then undone: A, B, C again.
+
+| pending items | action | result |
+|---|---|---|
+| A, B | done X is reopened by marking it | the order is X, A, B and X is next |
+| A, B, C | B is marked done, then the marking is undone | A, B, C again |

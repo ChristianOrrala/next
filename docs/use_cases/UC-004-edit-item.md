@@ -1,14 +1,13 @@
-# Use Case: Edit Item
-
-## Overview
-
-**Use Case ID:** UC-004  
-**Use Case Name:** Edit Item  
-**Primary Actor:** User  
-**Goal:** The user rewords an item in the open list, so it says what is to be done.  
-**Trigger:** The user sees an item in the open list that is worded wrong.  
-**Status:** Draft  
-**Requirements:** none yet; there is no requirements catalog
+---
+id: UC-004
+name: Edit Item
+primary_actor: User
+goal: The user rewords an item in the open list, so it says what is to be done.
+trigger: The user sees an item in the open list that is worded wrong.
+status: Draft
+requirements: []
+---
+# Edit Item
 
 ## Preconditions
 
@@ -99,7 +98,11 @@
 ### BR-001: An Edit Keeps the Text as Written
 
 The new text replaces the old, kept as written in the sense of UC-001 BR-002. An edit that leaves nothing keeps the old text.
-Examples: editing "fix test" to "fix the flaky test": the item reads "fix the flaky test". Editing it down to spaces: it still reads "fix test".
+
+| current text | new text | result |
+|---|---|---|
+| "fix test" | "fix the flaky test" | the item reads "fix the flaky test" |
+| "fix test" | only spaces | the item still reads "fix test" |
 
 ### BR-002: Retired, moved to UC-007 BR-001
 

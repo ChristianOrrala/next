@@ -1,14 +1,13 @@
-# Use Case: Watch the List
-
-## Overview
-
-**Use Case ID:** UC-002  
-**Use Case Name:** Watch the List  
-**Primary Actor:** User  
-**Goal:** The user keeps the folder's list in view beside their work, sees what comes next and what is done, and sees changes made from other panes as they happen.  
-**Trigger:** The user opens the list in a pane.  
-**Status:** Draft  
-**Requirements:** none yet; there is no requirements catalog
+---
+id: UC-002
+name: Watch the List
+primary_actor: User
+goal: The user keeps the folder's list in view beside their work, sees what comes next and what is done, and sees changes made from other panes as they happen.
+trigger: The user opens the list in a pane.
+status: Draft
+requirements: []
+---
+# Watch the List
 
 ## Preconditions
 
@@ -148,54 +147,106 @@
 ### BR-001: One List Per Repository or Folder
 
 Inside a repository, the list belongs to the top folder of the working tree the pane is in, so every pane working anywhere in that tree shares one list. A linked working tree of the same repository has its own list, a nested repository has its own list, and a pane inside the repository's own records folder, or one where the repository cannot be asked for its top folder, counts as outside a repository (S-018). Outside a repository, the list belongs to the folder itself.
-Examples: working in the folder lib inside the repository app: the list of app. Working in a folder that is in no repository: that folder's own list.
+
+| working in | result |
+|---|---|
+| the folder lib inside the repository app | the list of app |
+| a folder that is in no repository | that folder's own list |
 
 ### BR-002: The Title Shortens With the Pane
 
 The title reads the program's name, the list's name (the last part of its folder) and how many items are to do and done. As the pane narrows, it shows the program's name, the list's name and the to-do count only; then the list's name and the to-do count; then cuts that from the right with an ellipsis, so the count disappears before the name is shortened.
-Examples: a wide pane: the program's name, the list's name, 3 to do and 12 done. A narrower pane: the program's name, the list's name and 3. Narrower still: the list's name and 3, then the list's name alone, then the name cut short.
+
+| pane | result |
+|---|---|
+| wide | the program's name, the list's name, 3 to do and 12 done |
+| narrower | the program's name, the list's name and 3 |
+| narrower still | the list's name and 3 |
+| narrower again | the list's name alone |
+| narrowest | the name cut short |
 
 ### BR-003: Pending Items Are Shown Whole
 
 A pending item is shown in full, wrapped at spaces, with its later lines aligned under its text; runs of spaces inside it are shown as one space. A word longer than the line is broken across lines.
-Examples: a pending item longer than the pane takes two lines, the second indented under the first's text.
+
+| pending item | result |
+|---|---|
+| longer than the pane | takes two lines, the second indented under the first's text |
+| shorter than the pane | takes one line |
 
 ### BR-004: Done Items Take One Line
 
 A done item is shown on one line, newest first, and cut short with an ellipsis when it is longer than the line.
-Examples: a done item longer than its column ends in an ellipsis; the copied text is still whole (UC-005 BR-001).
+
+| done item | result |
+|---|---|
+| longer than its column | ends in an ellipsis; the copied text is still whole (UC-005 BR-001) |
+| fits its column | shown whole on its one line |
 
 ### BR-005: Room for Done Items in a Tall Pane
 
 The list area is the rows between the title and the keys. In a tall pane the done items get the free rows of the list area, those not taken by the pending items and the separating line, at least 3 and at most half of the list area. When more done items exist than that room, the line saying how many older ones are not shown takes one row of the room, but at least 3 done items are kept. A line separates the pending items from the done ones when both are shown. When the pending items fill the pane, the done items and that line come after them, below the visible part, and show only when the selection moves down to them.
-Examples: a list area of 20 rows, 2 pending items and 15 done: 9 done items and a line saying 6 older. The same area with pending items filling it and 5 done: 3 done items and a line saying 2 older, below the visible part. Exactly 3 done items and a full pane: all 3, with no line about older ones.
+
+| list area | pending items | done items | result |
+|---|---|---|---|
+| 20 rows | 2 | 15 | 9 done items and a line saying 6 older |
+| 20 rows | fill the area | 5 | 3 done items and a line saying 2 older, below the visible part |
+| any | fill the pane | exactly 3 | all 3, with no line about older ones |
 
 ### BR-006: The Keys Are Spelled Out While There Is Room
 
 The keys are, with their words: a add, e edit, x done, y copy, J/K move, tab col (other kind), d delete, u undo, esc deselect, q quit. They are shown in aligned columns, as many columns as the width allows, while the list fits above them. When the list needs those rows, or the keys fit on one row anyway, they fold into a single line that shortens as the pane narrows: every key with its word; then the keys alone, a e x y J K tab d u esc q; then a e x y d u q; and nothing when even that does not fit.
-Examples: a short list in a narrow pane: the keys in a grid. A long list in the same pane: one line of letters. A pane under 14 columns: no keys.
+
+| pane | list | result |
+|---|---|---|
+| narrow | short | the keys in a grid |
+| the same narrow pane | long | one line of letters |
+| under 14 columns | any | no keys |
 
 ### BR-007: Changes From Elsewhere Appear on Their Own
 
 The open list shows what other panes add or change within 1 second, without the user doing anything, and marks items that arrived for 3 seconds, or until the next change from elsewhere arrives or the user undoes a change (S-015). Opening the list marks nothing, and neither does a change made from this pane. While the user is writing an item or an edit, changes from elsewhere wait until the writing ends.
-Examples: the user adds an item from another pane: it appears in the open list, marked, within 1 second, and the mark is gone 3 seconds later. A second item arrives a moment later: only the second is marked.
+
+| change from elsewhere | result |
+|---|---|
+| the user adds an item from another pane | it appears in the open list, marked, within 1 second, and the mark is gone 3 seconds later |
+| a second item arrives a moment later | only the second is marked |
 
 ### BR-008: Wide Pane Layout
 
 A pane is wide when it is at least 70 columns wide and more than twice as wide as it is tall. To keep a dragged split from flickering, the layout changes only 3 columns past that line in either direction, on both measures. When the list opens, it counts as tall.
-Examples: a tall layout at 72 by 20 stays tall; at 73 by 20 it becomes wide. A wide layout at 67 by 20 stays wide; at 66 by 20 it becomes tall. 100 by 60 is tall, being less than twice as wide as tall.
+
+| layout now | pane (columns by rows) | result |
+|---|---|---|
+| tall | 72 by 20 | stays tall |
+| tall | 73 by 20 | becomes wide |
+| wide | 67 by 20 | stays wide |
+| wide | 66 by 20 | becomes tall |
+| tall | 100 by 60 | tall, being less than twice as wide as tall |
 
 ### BR-009: Nothing Is Selected Until the User Moves
 
 When the list opens, after a change from elsewhere arrives with nothing selected, and after the user clears it, no item is selected. The first move selects the next pending item, or the first item shown when none is pending. When the selected item is gone, the next pending item is selected, or the first item shown when none is pending. When a change arrives from elsewhere, the selection lands on the first item with the same text and mark, which may be a twin of the one selected (S-017).
-Examples: open the list and move down: the next pending item is selected. Clear the selection, another pane adds an item: still nothing selected.
+
+| situation | result |
+|---|---|
+| the list is opened and the user moves down | the next pending item is selected |
+| the selection is cleared and another pane adds an item | still nothing selected |
 
 ### BR-010: The Terminal's Own Colors
 
 The list uses the colors of the terminal's own theme and none of its own. In a terminal with fewer than 16 colors it uses dim and reversed text instead.
-Examples: changing the terminal's theme changes the list's colors with it.
+
+| terminal | result |
+|---|---|
+| its theme is changed | the list's colors change with it |
+| fewer than 16 colors | dim and reversed text instead |
 
 ### BR-011: The File Is Read as It Is
 
 The open list reads its file again whenever the file changes, edited by another pane or by hand, in the form of UC-006 BR-002. A first line that starts with a byte-order mark is not read as an item (S-013), and lines that are not items are dropped the next time the list changes (S-008).
-Examples: the user adds a line marked done to the file by hand: the open list shows it as a done item within 1 second. A heading written into the file disappears at the next change.
+
+| change to the file | result |
+|---|---|
+| the user adds a line marked done by hand | the open list shows it as a done item within 1 second |
+| a heading is written into the file | it disappears at the next change |

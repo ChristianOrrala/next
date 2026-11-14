@@ -1,14 +1,13 @@
-# Use Case: Delete Item
-
-## Overview
-
-**Use Case ID:** UC-008  
-**Use Case Name:** Delete Item  
-**Primary Actor:** User  
-**Goal:** The user removes an item that no longer applies, so the list holds only what is still worth doing or remembering.  
-**Trigger:** The user sees an item in the open list that is no longer wanted.  
-**Status:** Draft  
-**Requirements:** none yet; there is no requirements catalog
+---
+id: UC-008
+name: Delete Item
+primary_actor: User
+goal: The user removes an item that no longer applies, so the list holds only what is still worth doing or remembering.
+trigger: The user sees an item in the open list that is no longer wanted.
+status: Draft
+requirements: []
+---
+# Delete Item
 
 ## Preconditions
 
@@ -54,9 +53,21 @@
 ### BR-001: A Deleted Item Is Gone
 
 Deleting removes the item from the list for good, done or pending; only an undo from the same open list brings it back (UC-009 BR-001, S-009).
-Examples: as intended, since today delete stops the program (S-010), delete pending B from A, B, C: A, C remain. Close the list, open it again: B cannot be brought back.
+
+| list | action | result |
+|---|---|---|
+| pending A, B, C | delete pending B | A, C remain |
+| the list closed and opened again | bring B back | B cannot be brought back |
+
+The examples are as intended: today delete stops the program (S-010).
 
 ### BR-002: The Selection After a Delete
 
 After a delete, the selection moves to the item that took the deleted item's place, or to the one before it when the deleted item was the last shown, or to nothing when the list is empty. Today this is never reached (S-010).
-Examples: as intended, pending A, B, C with B selected, B deleted: C is selected. C deleted instead: B is selected.
+
+| list | selected | deleted | result |
+|---|---|---|---|
+| pending A, B, C | B | B | C is selected |
+| pending A, B, C | C | C | B is selected |
+
+The examples are as intended: today this is never reached (S-010).

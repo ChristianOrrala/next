@@ -1,14 +1,13 @@
-# Use Case: Locate the List
-
-## Overview
-
-**Use Case ID:** UC-006  
-**Use Case Name:** Locate the List  
-**Primary Actor:** User  
-**Goal:** The user finds where the folder's list is kept, to read it, edit it by hand or keep a copy.  
-**Trigger:** The user asks where the folder's list is kept.  
-**Status:** Draft  
-**Requirements:** none yet; there is no requirements catalog
+---
+id: UC-006
+name: Locate the List
+primary_actor: User
+goal: The user finds where the folder's list is kept, to read it, edit it by hand or keep a copy.
+trigger: The user asks where the folder's list is kept.
+status: Draft
+requirements: []
+---
+# Locate the List
 
 ## Preconditions
 
@@ -65,9 +64,18 @@ Moved when the review found it describes what happens after this use case ends: 
 ### BR-001: Lists Live Outside the Folder
 
 Every list is kept in one place of the user's own, outside the folder it belongs to, so it never shows among the folder's files, unless the chosen place is given relative to the folder or lies inside it, or the folder is the user's home folder or another folder that contains the place (S-021). The place is the folder .local/share/next in the user's home folder, or the one the user names in the setting NEXT_DIR. Each folder's list is a file in that place named after the folder's full location, without its leading separator, each separator turned into a dash, with .md at the end; the top folder of the machine gives root.md. Two folders whose locations read the same once separators become dashes share one file (S-007), and a folder whose location is longer than 249 characters cannot keep a list (S-012).
-Examples: the folder /home/ana/app keeps its list in home-ana-app.md. The list of a repository never appears among the repository's changes. The folders a/b-c and a-b/c share one list.
+
+| folder | result |
+|---|---|
+| /home/ana/app | its list is kept in home-ana-app.md |
+| a repository | its list never appears among the repository's changes |
+| a/b-c and a-b/c | they share one list (S-007) |
 
 ### BR-002: The List Is Plain Text, Newest First
 
 The file holds one item per line, pending items first from the one added last down to the next one, then done items newest first. A pending item's line starts with a dash, a space and an open box, [ ] and a space; a done item's line with [x] or [X] in its place. The text follows on the same line.
-Examples: pending A then B added, X done: the file reads B, A, then X, each with its mark. A line marked done in capitals counts as done.
+
+| list | result |
+|---|---|
+| pending A then B added, X done | the file reads B, A, then X, each with its mark |
+| a line marked [X] in capitals | counts as done |

@@ -1,14 +1,13 @@
-# Use Case: Note Next Item
-
-## Overview
-
-**Use Case ID:** UC-001  
-**Use Case Name:** Note Next Item  
-**Primary Actor:** User  
-**Goal:** The user writes down the next thing to do without leaving what they are doing, and it waits in the folder's list behind what was already there.  
-**Trigger:** The user thinks of something to do next while working in a folder.  
-**Status:** Draft  
-**Requirements:** none yet; there is no requirements catalog
+---
+id: UC-001
+name: Note Next Item
+primary_actor: User
+goal: The user writes down the next thing to do without leaving what they are doing, and it waits in the folder's list behind what was already there.
+trigger: The user thinks of something to do next while working in a folder.
+status: Draft
+requirements: []
+---
+# Note Next Item
 
 ## Preconditions
 
@@ -123,19 +122,36 @@
 ### BR-001: A New Item Waits Behind the Others
 
 A new item is pending and goes after every other pending item, so the next item stays the same unless the list had no pending item.
-Examples: pending items A and B, add C: the order is A, B, C and A is still next. No pending items, add C: C is next.
+
+| pending items before | new item | result |
+|---|---|---|
+| A, B | C | the order is A, B, C and A is still next |
+| none | C | C is next |
 
 ### BR-002: The Text Is Kept as Written
 
 The item's text is what the user wrote, with blank characters (spaces, tabs, line breaks, no-break and wide spaces) removed from its two ends only; in the open list only spaces can be typed there, since it takes visible keys and spaces only. When adding without opening the list, the separate pieces given are joined with one space between each, and spaces inside a piece are kept. Keys that write nothing visible are not taken into the text.
-Examples: three separate words fix, the and test give "fix the test". The pieces fix, an empty piece and test give "fix  test" with two spaces. Text with only spaces adds nothing (A2).
+
+| given | result |
+|---|---|
+| three separate words "fix", "the" and "test" | "fix the test" |
+| the pieces "fix", an empty piece and "test" | "fix  test" with two spaces |
+| text with only spaces | nothing is added (A2) |
 
 ### BR-003: One Line Per Item
 
 An item is one line. When the user pastes several lines into the open list, only the first is kept; what of the paste arrives after the line is confirmed acts as keys (S-019).
-Examples: pasting two lines "check the parser" and "then the docs" in one burst adds "check the parser" and nothing else.
+
+| pasted into the open list in one burst | result |
+|---|---|
+| two lines, "check the parser" and "then the docs" | adds "check the parser" and nothing else |
+| one line, "check the parser" | adds "check the parser" |
 
 ### BR-004: The Selection After Adding
 
 After adding from the open list, the selection lands on the new item when an item was selected before, and nothing is selected when nothing was.
-Examples: item B selected, add C: C is selected. Nothing selected, add C: nothing is selected.
+
+| selection before the add | new item | result |
+|---|---|---|
+| item B selected | C | C is selected |
+| nothing selected | C | nothing is selected |

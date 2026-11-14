@@ -1,15 +1,14 @@
-# Use Case: Copy Item
-
-## Overview
-
-**Use Case ID:** UC-005  
-**Use Case Name:** Copy Item  
-**Primary Actor:** User  
-**Secondary Actors:** Local Clipboard, Viewing Terminal  
-**Goal:** The user takes an item's text to paste elsewhere, typically into the prompt of the agent they are working with, clean and in one piece.  
-**Trigger:** The user wants to paste an item's text somewhere else.  
-**Status:** Draft  
-**Requirements:** none yet; there is no requirements catalog
+---
+id: UC-005
+name: Copy Item
+primary_actor: User
+secondary_actors: [Local Clipboard, Viewing Terminal]
+goal: The user takes an item's text to paste elsewhere, typically into the prompt of the agent they are working with, clean and in one piece.
+trigger: The user wants to paste an item's text somewhere else.
+status: Draft
+requirements: []
+---
+# Copy Item
 
 ## Preconditions
 
@@ -79,9 +78,17 @@
 ### BR-001: The Copied Text Is the Item Alone
 
 The copied text is exactly the item's text: no mark of pending or done, and none of the line breaks the pane added to fit it. A done item is copied whole even when the pane shows it cut short.
-Examples: a pending item shown over two lines is copied as one line. A done item shown with an ellipsis is copied in full.
+
+| item | result |
+|---|---|
+| a pending item shown over two lines | copied as one line |
+| a done item shown with an ellipsis | copied in full |
 
 ### BR-002: Both Clipboards, Every Time
 
 The list always asks the terminal the user is looking at to fill its own clipboard, even when this machine's clipboard was filled, so that copying works when the pane is viewed from another machine.
-Examples: a pane on a remote machine viewed over a remote session: the text lands on the viewing machine's clipboard.
+
+| pane | result |
+|---|---|
+| on a remote machine, viewed over a remote session | the text lands on the viewing machine's clipboard |
+| on this machine, whose clipboard was filled | the terminal is still asked to fill its own clipboard |
