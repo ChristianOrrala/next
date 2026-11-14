@@ -1,14 +1,58 @@
 {
   "hooks": {
-    "SessionStart": [{"matcher": "startup|resume", "hooks": [{"type": "command",
-      "command": "cd \"$CLAUDE_PROJECT_DIR\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py session-start; fi"}]}],
-    "PostToolUse": [
-      {"matcher": "Edit", "hooks": [{"type": "command", "if": "Edit(docs/use_cases/**)",
-        "command": "cd \"$CLAUDE_PROJECT_DIR\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py after-edit 1>&2; fi"}]},
-      {"matcher": "Write", "hooks": [{"type": "command", "if": "Write(docs/use_cases/**)",
-        "command": "cd \"$CLAUDE_PROJECT_DIR\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py after-edit 1>&2; fi"}]}
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py session-start --emit claude; fi"
+          }
+        ]
+      }
     ],
-    "Stop": [{"hooks": [{"type": "command",
-      "command": "cd \"$CLAUDE_PROJECT_DIR\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py before-stop 1>&2; fi"}]}]
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py after-edit --emit claude; fi",
+            "if": "Edit(docs/use_cases/**)"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py after-edit --emit claude; fi",
+            "if": "Write(docs/use_cases/**)"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && if [ -f tools/specs/hook_gate.py ]; then python3 tools/specs/hook_gate.py before-stop --emit claude; fi"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ root=\"$(git rev-parse --show-toplevel 2>/dev/null)\" && cd \"$root\" && [ -f tools/specs/hook_gate.py ] && python3 tools/specs/hook_gate.py turn-start --emit claude; } 2>/dev/null || exit 0",
+            "timeout": 8
+          }
+        ]
+      }
+    ]
   }
 }

@@ -46,5 +46,34 @@
       "baseline": "4fc142d6b46df7bfa183f159392eba892459d1eda6cd458aa650637b72e574b5"
     }
   },
-  "version": "1.8.1"
+  "version": "1.8.1",
+  "wiring": {
+    "claude": {
+      "adapted": [],
+      "entries": [
+        {
+          "fingerprint": "fd8788bc79cb300d58e0f886ef9f352a83ba59d6266ce29628b673ec30f29ceb",
+          "moment": "session-start"
+        },
+        {
+          "fingerprint": "38909b99ace3f6236522bde1f17df7ca750a8fa2fc58680f77facc0ca3e5dc58",
+          "moment": "after-edit"
+        },
+        {
+          "fingerprint": "63f3984d5287d47e72e2e41476b9cb7a08ca43337e84e9941682a675d339f793",
+          "moment": "after-edit"
+        },
+        {
+          "fingerprint": "d3d3aed84c1275319fb4107962778f14c93a5724ae32f872312c71001b672f2f",
+          "moment": "before-stop"
+        },
+        {
+          "fingerprint": "1be8a788a6d9efcfa39fa01d1e83e98fa8829eb8abfebc1ab3aa0bc1187237df",
+          "moment": "turn-start"
+        }
+      ],
+      "file": ".claude/settings.json",
+      "tool": "claude"
+    }
+  }
 }
