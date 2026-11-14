@@ -13,10 +13,10 @@ The things to do next for one folder: the repository it sits in, or the folder i
 
 **Not:** todo list, board, backlog
 
-| Attribute | Description | Data Type | Length/Precision | Validation Rules |
-|-----------|-------------|-----------|------------------|------------------|
-| scope | The folder the list belongs to: the root of the repository, or the folder itself; a longer location cannot keep a list (S-012) | String | 249 | Primary Key |
-| name | The last part of the scope, shown as the list's title | String | 255 | Not Null |
+| Attribute | Meaning | Type | Rules |
+|-----------|---------|------|-------|
+| scope | The folder the list belongs to: the root of the repository, or the folder itself; a longer location cannot keep a list (S-012) | Identifier | Unique, never reused |
+| name | The last part of the scope, shown as the list's title | Text | Required |
 
 ### ITEM
 
@@ -24,12 +24,12 @@ One thing to do next, written as one line of free text, either still pending or 
 
 **Not:** task, todo, entry
 
-| Attribute | Description | Data Type | Length/Precision | Validation Rules |
-|-----------|-------------|-----------|------------------|------------------|
-| list_scope | The LIST this item belongs to, given by the list it is kept in | String | 249 | Not Null, Foreign Key (LIST.scope) |
-| position | Its place among the items of its list, which decides what comes next; given by the order of the list, not written down | Integer | 10 | Not Null, Min: 1 |
-| text | What to do, as the user wrote it, on one line; empty only when written so by hand; no length limit is set (S-011) | String | 4096 | Not Null |
-| status | Where it stands, kept as the mark of its line: open for Pending, crossed for Done | String | 7 | Not Null, Values: Pending, Done |
+| Attribute | Meaning | Type | Rules |
+|-----------|---------|------|-------|
+| list_scope | The LIST this item belongs to, given by the list it is kept in | Reference to LIST | Required |
+| position | Its place among the items of its list, which decides what comes next; given by the order of the list, not written down | Number | Required, Min: 1 |
+| text | What to do, as the user wrote it, on one line; empty only when written so by hand; no length limit is set (S-011) | Text | Required |
+| status | Where it stands, kept as the mark of its line: open for Pending, crossed for Done | Choice of Pending, Done | Required |
 
 **Lifecycle:** Pending → Done; Done → Pending
 

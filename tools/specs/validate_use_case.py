@@ -14,7 +14,8 @@ INFO   worth a look, never a failure: screen detail, a quantity without boundary
        long quotation of screen wording.
 
 Output: path:line: SEVERITY CODE [element]: message
-Exit code 0 when clean, 1 on any ERROR (with --strict also on any WARN), 2 on usage errors.
+Exit code 0 when it ran, whatever it found, an unreadable file (UNREADABLE) included
+(with --strict 1 on any ERROR or WARN), 2 on usage errors.
 
 Usage:
     validate_use_case.py [--docs DIR] [--strict] FILE...
@@ -33,8 +34,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spec_model as model  # noqa: E402  (local module, same folder)
 
-REQUIRED_FIELDS = ("Use Case ID", "Use Case Name", "Primary Actor", "Goal", "Status")
-REQUIRED_SECTIONS = ("Overview", "Main Success Scenario", "Alternative Flows", "Postconditions")
+# the release these copies belong to; hook_gate.py refuses siblings of another release
+UPSPEC_VERSION = "1.8.1"
+
+REQUIRED_SECTIONS = ("Main Success Scenario", "Alternative Flows", "Postconditions")
 EXPECTED_SECTIONS = ("Preconditions", "Business Rules")
 MIN_STEPS, MAX_STEPS = 3, 9     # the method's bound for a main success scenario
 # Size a stakeholder can skim and an engineer can review in one sitting. Measured on a real
@@ -70,21 +73,24 @@ def _first_words_ok(text, actors):
 def check_use_case(uc, report, entity_nouns=(), catalog_exists=False):
     """Append findings for one parsed use case to the reporter."""
     path, uid = uc.path, uc.id or os.path.basename(uc.path)
+    for section, title, line in uc.duplicate_sections:
+        report.error(path, line, "DUPLICATE_SECTION", uid,
+                     "section '## %s' duplicates '## %s' at line %d" %
+                     (title, uc.section_titles[section], uc.section_lines[section]))
+    if uc.is_stub:
+        return
     if uc.title is None:
-        report.error(path, 1, "TITLE_MISSING", uid, "no '# Use Case: <name>' title")
+        report.error(path, 1, "TITLE_MISSING", uid, "no '# <name>' title")
     for section in REQUIRED_SECTIONS:
         if section not in uc.section_lines:
             report.error(path, 0, "SECTION_MISSING", uid, "section '## %s' is missing" % section)
     for section in EXPECTED_SECTIONS:
         if section not in uc.section_lines:
             report.warn(path, 0, "SECTION_MISSING", uid, "section '## %s' is missing" % section)
-    for label in REQUIRED_FIELDS:
-        if not uc.field(label):
-            report.error(path, uc.section_lines.get("Overview", 0), "FIELD_MISSING", uid, "Overview has no **%s:** value" % label)
-    id_text, id_line = uc.fields.get("Use Case ID", ("", 0))
+    id_text, id_line = (uc.field("Use Case ID"), uc.field_line("Use Case ID"))
     if id_text and not re.fullmatch(r"UC-\d{3}", id_text.strip()):
         report.error(path, id_line, "ID_FORMAT", uid, "identifier must be UC- and three digits, got '%s'" % id_text)
-    status, status_line = uc.status, uc.fields.get("Status", ("", 0))[1]
+    status, status_line = uc.status, uc.field_line("Status")
     if uc.field("Status") and status not in model.UC_STATUSES:
         report.error(path, status_line, "STATUS_INVALID", uid, "Status '%s' is not one of %s" % (uc.field("Status"), ", ".join(model.UC_STATUSES)))
     if uc.id and uc.name:
@@ -92,13 +98,13 @@ def check_use_case(uc, report, entity_nouns=(), catalog_exists=False):
         if os.path.basename(path) != expected:
             report.warn(path, 0, "FILE_NAME", uid, "file should be named %s" % expected)
     if not uc.field("Trigger"):
-        report.warn(path, uc.section_lines.get("Overview", 0), "TRIGGER_MISSING", uid, "Overview has no **Trigger:** naming the event that starts the use case")
+        report.warn(path, uc.field_line("Trigger"), "TRIGGER_MISSING", uid, "front matter has no trigger naming the event that starts the use case")
     if re.fullmatch(r"(the )?system", uc.field("Primary Actor").strip(), re.IGNORECASE):
-        report.warn(path, uc.fields["Primary Actor"][1], "PRIMARY_ACTOR_SYSTEM", uid, "the system is never the primary actor; name the role or the time or external system that starts the use case")
+        report.warn(path, uc.field_line("Primary Actor"), "PRIMARY_ACTOR_SYSTEM", uid, "the system is never the primary actor; name the role or the time or external system that starts the use case")
     req_ids = uc.requirement_ids
     if catalog_exists and not any(r.startswith("FR-") for r in req_ids):
-        report.warn(path, uc.fields.get("Requirements", ("", uc.section_lines.get("Overview", 0)))[1], "REQUIREMENTS_LINE", uid,
-                    "no **Requirements:** line that links at least one functional requirement")
+        report.warn(path, uc.field_line("Requirements"), "REQUIREMENTS_LINE", uid,
+                    "requirements links no functional requirement")
 
     # main success scenario
     numbers = [s.number for s in uc.steps]
@@ -218,8 +224,8 @@ def check_use_case(uc, report, entity_nouns=(), catalog_exists=False):
             report.warn(path, rule.line, "RULE_EMPTY", element, "rule has no statement")
         if rule.id not in cited_here:
             report.warn(path, rule.line, "RULE_UNCITED", element, "rule is cited by no step or flow")
-        if text and QUANTITY.search(text) and not re.search(r"\bExamples?\s*:", text):
-            report.info(path, rule.line, "RULE_BOUNDARY", element, "rule has a quantity or date but no 'Examples:' line that settles the boundary")
+        if text and QUANTITY.search(text) and rule.examples is None:
+            report.info(path, rule.line, "RULE_BOUNDARY", element, "rule has a quantity or date but no Examples table that settles the boundary")
 
     # wording
     nouns = {n.lower() for n in entity_nouns}
@@ -230,7 +236,7 @@ def check_use_case(uc, report, entity_nouns=(), catalog_exists=False):
     passages += [(line, text, r.id) for r in uc.rules if not r.retired for line, text in r.body if text.strip()]
     for label in ("Goal", "Trigger"):
         if uc.field(label):
-            passages.append((uc.fields[label][1], uc.field(label), label))
+            passages.append((uc.field_line(label), uc.field(label), label))
     for line, text, where in passages:
         element = "%s %s" % (uid, where)
         for word in model.word_hits(text, model.WEAK_WORDS):
@@ -252,20 +258,72 @@ def check_use_case(uc, report, entity_nouns=(), catalog_exists=False):
                             "a quotation of %d words; say what the message tells the actor, and quote exact words only where a rule depends on them" % len(quoted.split()))
 
 
-def validate_files(paths, docs_dir=None, report=None):
+def _edited_old_formats(paths, docs_dir, stream):
+    """Recognize edited use cases without reading another artifact's possibly broken body."""
+    found = []
+    edited = {os.path.realpath(path) for path in paths}
+    for path in paths:
+        docs = model.Docs(docs_dir)
+        docs.use_case_files = lambda path=path: [path]
+        docs.test_case_files = lambda: []
+        docs.change_record_files = lambda: []
+        docs.record_search_unreadable = lambda not_searched=None: []
+        docs.entity_model = docs.requirements = docs.vision = docs.overview = docs.recovery_dir = None
+        docs.unresolved = {}
+        try:
+            found.extend(finding for finding in model.old_formats(docs)
+                         if os.path.realpath(finding[0]) in edited)
+        except (OSError, UnicodeDecodeError):
+            # Normal per-file validation reports unreadable edited paths below.
+            continue
+    if not found:
+        return None
+    stream = sys.stderr if stream is None else stream
+    for path, line, what in found:
+        stream.write("%s:%d: ERROR OLD_FORMAT: %s\n" % (path, line, what))
+    stream.write("The edited use case uses an earlier format. Migrate it with up-migrating-spec-formats "
+                 "(scripts/migrate_formats.py plan).\n")
+    return model.OLD_FORMAT_EXIT
+
+
+def validate_files(paths, docs_dir=None, report=None, *, local=False, stream=None):
     report = report or model.Reporter(os.getcwd())
     nouns, catalog = set(), False
-    if docs_dir and os.path.isdir(docs_dir):
+    if not paths:
+        return report
+    docs_dir = docs_dir or os.path.dirname(os.path.dirname(os.path.abspath(paths[0])))
+    # A specification folder there as a link that cannot be resolved, or behind one, is unreadable, not absent: the
+    # old-format check names it.
+    if model.folder_present(docs_dir):
         docs = model.Docs(docs_dir)
+        # The folder is listed in the tolerant pass of the old-format check, with the files given: a folder that cannot
+        # be listed is then named beside an earlier format elsewhere, which wins.
+        listing, given = docs.use_case_files, [os.path.abspath(p) for p in paths if os.path.isfile(p)]
+        docs.use_case_files = lambda: sorted(set(listing() + given))
+        try:
+            # The report holds an unreadable file as a finding; main applies --strict to the report.
+            old = (_edited_old_formats(paths, docs_dir, stream) if local else
+                   model.stop_if_old(docs, report=report, stream=stream, strict=True))
+        except (OSError, UnicodeDecodeError) as exc:
+            report.error(docs.root, 0, "UNREADABLE", "-",
+                         "cannot read specification artifacts for old-format recognition: %s" % exc)
+            return report
+        if old == model.OLD_FORMAT_EXIT:
+            return old
+        if old is not None:
+            return report
         catalog = bool(docs.requirements)
         if docs.entity_model:
             try:
                 nouns = model.parse_entity_model(docs.entity_model).nouns()
-            except OSError as exc:
-                report.info(docs.entity_model, 0, "ENTITY_MODEL_UNREADABLE", "-", str(exc))
+            except (OSError, UnicodeDecodeError) as exc:
+                report.error(docs.entity_model, 0, "UNREADABLE", "-", "cannot read the entity model: %s" % exc)
     for path in paths:
         try:
-            check_use_case(model.parse_use_case(path), report, nouns, catalog)
+            uc = model.parse_use_case(path)
+            for finding_path, line, code, message in model.use_case_format_findings(uc):
+                report.error(finding_path, line, code, uc.id, message)
+            check_use_case(uc, report, nouns, catalog)
         except (OSError, UnicodeDecodeError) as exc:
             report.error(path, 0, "UNREADABLE", "-", "cannot read the file: %s" % exc)
     return report
@@ -275,10 +333,12 @@ def main(argv):
     parser = argparse.ArgumentParser(description="Check use case specification files.")
     parser.add_argument("files", nargs="+")
     parser.add_argument("--docs", help="docs folder (default: parent of the first file's folder)")
-    parser.add_argument("--strict", action="store_true", help="fail on warnings too")
+    parser.add_argument("--strict", action="store_true", help="exit 1 on any error or warning (default: exit 0, findings are reported)")
     args = parser.parse_args(argv)
     docs_dir = args.docs or os.path.dirname(os.path.dirname(os.path.abspath(args.files[0])))
     report = validate_files(args.files, docs_dir)
+    if isinstance(report, int):
+        return report
     report.print_text()
     return report.exit_code(args.strict)
 

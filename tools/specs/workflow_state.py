@@ -4,25 +4,55 @@
 State comes from the files, never from memory:
   - the profile and skipped artifacts recorded in the guideline file (AGENTS.md or CLAUDE.md);
   - which artifacts of the chain exist (vision, catalog, entity model, diagram);
-  - every use case with its Status, including those that are only in the diagram;
+  - every use case with its Status, including Draft stubs awaiting their body;
   - a recovery in progress: use cases recovered from code (rows in docs/recovery/ledger.md)
     whose specification is still Draft, waiting for the baseline review;
-  - mismatches between diagram and specification files;
+  - invalid identifiers or Status values in specification files;
   - journey test cases, and whether the repository holds code.
   - with the A-files (ACTIVE.md with a hot zone): the current work, what blocks it and
     what waits on the owner, AHEAD's Next up, the abilities and the use cases their
-    Specs lines name. The step for the current work comes before the others; a use
-    case in progress that the current work does not name, and an ability whose
-    status disagrees with its use cases, are listed.
+    Specs lines name. An ability's status comes from its row in any index table of
+    ABILITIES.md, else from an old entry's Status line. The step for the current work
+    comes before the others; a use case in progress that the current work does not
+    name, and an ability whose status disagrees with its use cases, are listed: done
+    while one is not Done, planned while one is built, in progress while all are Done.
+    Without ABILITIES.md nothing is said about abilities.
+  - the alignment backlog of a recovery (docs/recovery/change-log.md): entries decided
+    later or in change are open; aligned closes only when the shared closure check
+    finds no errors in its audit reports, otherwise it stays open with warnings;
+    dropped is closed and undecided is counted. An entry in change whose use cases
+    are all Tested or Done gets a hint that its audit report can close it. With the
+    A-files, a later entry without an AHEAD item, an AHEAD item that does not exist and
+    a done ability with open entries are warned. The count never changes the next step.
 
 The decision rows are tried top to bottom; the first that matches is the next
 step. Every use case also gets its own next step, so work on another use case
 can go on in parallel.
 
+The JSON also gives, beside every list of sentences that has one, the same items
+with a stable code (coded_mismatches, coded_warnings): UC_NO_ID, UC_ID_REUSED,
+UC_STATUS_INVALID; IN_PROGRESS_NOT_CURRENT; SPECS_UNKNOWN_USE_CASE,
+DONE_ABILITY_NOT_DONE, PLANNED_ABILITY_BUILT, IN_PROGRESS_ABILITY_DONE, DONE_ABILITY_OPEN_ENTRY,
+LATER_WITHOUT_AHEAD, AHEAD_ITEM_UNKNOWN; and for an aligned entry that stays open,
+the code of the closure check (AUDIT_REPORT_MISSING, AUDIT_REPORT_INVALID,
+AUDIT_REPORT_STALE, ALIGNED_INCOMPLETE). The alignment lists its dropped entries
+(dropped_entries) as it lists the open ones, each with its reason; with the A-files
+the tracking gives the use cases that deliver each ability (abilities) and how many
+abilities had their status compared with their use cases (abilities_compared): those
+planned, in progress or done whose Specs line names a use case that exists. Zero
+means nothing was compared, not that everything agrees.
+
 Step codes: SETUP, RECOVER, BASELINE_REVIEW, VISION, REQUIREMENTS, ENTITY_MODEL, DIAGRAM,
 FIX, TEST, IMPLEMENT, APPROVE, REVIEW, SPECIFY, MAP, JOURNEY, BUSINESS_REVIEW, IDLE.
 
-Exit code 0, 2 on usage errors.
+Exit code 0; 2 on usage errors, and when a specification file cannot be read: each is named on standard error, a
+link that cannot be resolved in place of a file or a folder included, which is never read as missing, so no step
+asks to write it; so is a specification folder behind such a link or behind a folder that cannot be searched, which
+never gets SETUP. The earlier formats are looked for in every file first: they win, as MIGRATE (exit 0), and each
+file that cannot be read is named beside it ("unreadable:" lines; in JSON, migration.unreadable as file and error).
+A folder under the specification folder that cannot be listed and that the method does not own (a tool's cache,
+node_modules) changes no exit code and no step: a "note: ... was not searched for change records" line on standard
+error names it, in either format, and the JSON lists it under not_searched as folder and error.
 
 Usage:
     workflow_state.py [--docs DIR] [--format text|json]
@@ -30,13 +60,18 @@ Usage:
 Requires Python 3.9+, standard library only. Reads files as data; writes nothing.
 """
 import argparse
-import json
 import os
 import re
 import sys
 
+# a __pycache__ folder beside an installed copy would be a file this read wrote, when a program runs it there
+sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import use_case_map
 import spec_model as model  # noqa: E402  (local module, same folder)
+
+# the release these copies belong to; hook_gate.py refuses siblings of another release
+UPSPEC_VERSION = "1.8.1"
 
 PLACEHOLDER = re.compile(r"\[[^\]\n]+\](?!\()")
 SOURCE_SUFFIXES = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java", ".kt", ".kts", ".go", ".rb", ".php",
@@ -44,8 +79,20 @@ SOURCE_SUFFIXES = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java",
                    ".ex", ".exs", ".dart", ".groovy")
 # Counting stops here: the question is whether there is a code base, not how large it is.
 CODE_COUNT_CAP = 50
+DEBT_SHOWN = 5
+# The ability statuses the pairing rule P2 compares with the use cases an ability names.
+COMPARED_STATUSES = ("planned", "in progress", "done")
 # A use case in these Status values has been built and is waiting for tests or for the business: work in progress.
 IN_PROGRESS = ("Implemented", "Tested")
+# Status values at which a use case can be audited for alignment: the hint names the report that would close it.
+READY = ("Tested", "Done")
+# Inspect both installation sets without depending on the plugin-only installed_copies module.
+INSTALLED_SCRIPTS = ("status_claims.py", "hook_gate.py", "workflow_state.py", "validate_use_case.py", "finish_change.py",
+                     "scope_audit.py", "uc_change_list.py", "unrecorded_changes.py", "spec_model.py",
+                     "use_case_map.py", "change_view.py", "hook_profiles.py", "spec_lint.py", "spec_first_guard.py",
+                     "spec_data.py")
+# Read a literal release line as data, using the same format as hook_gate and the release checks.
+VERSION_LINE = re.compile(r'^UPSPEC_VERSION = "(\d+\.\d+\.\d+)"$', re.M)
 
 # Status -> (step code, who or which skill acts, what happens)
 PER_STATUS = {
@@ -56,13 +103,50 @@ PER_STATUS = {
     "Tested": ("BUSINESS_REVIEW", "a person", "the business accepts the behavior; Status becomes Done"),
 }
 SKILLS = {
-    "SETUP": "up-1-bootstrapping-spec-driven-projects", "VISION": "up-1-bootstrapping-spec-driven-projects",
+    "SETUP": "up-bootstrapping-spec-driven-projects", "VISION": "up-bootstrapping-spec-driven-projects",
     "RECOVER": "up-recovering-specs-from-code", "REQUIREMENTS": "up-2-cataloging-requirements",
     "BASELINE_REVIEW": "up-6-reviewing-specifications, then the owner",
     "ENTITY_MODEL": "up-3-modeling-domain-entities", "DIAGRAM": "up-4-mapping-use-cases", "FIX": "up-6-reviewing-specifications",
+    "FIX_FORMAT": "up-6-reviewing-specifications",
     "SPECIFY": "up-5-writing-use-case-specs", "MAP": "up-4-mapping-use-cases", "JOURNEY": "up-writing-journey-test-cases",
-    "IDLE": "up-triaging-change-requests",
+    "IDLE": "up-1-triaging-change-requests",
 }
+
+
+def update_notice(root: str) -> "str | None":
+    """Report older installed copies only when this reader runs from the plugin."""
+    folder = os.path.join(root, "tools", "specs")
+    if (not os.path.isdir(folder) or
+            os.path.realpath(__file__) == os.path.realpath(os.path.join(folder, "workflow_state.py"))):
+        return None
+    versions, unmarked = [], False
+    for name in INSTALLED_SCRIPTS:
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                match = VERSION_LINE.search(handle.read())
+        except (OSError, UnicodeError):
+            # A notice is advisory; an unreadable version must not stop the state report.
+            match = None
+        if match:
+            versions.append(tuple(int(part) for part in match.group(1).split(".")))
+        else:
+            unmarked = True
+    if not unmarked and (not versions or min(versions) >= tuple(int(p) for p in UPSPEC_VERSION.split("."))):
+        return None
+    installed = "before 1.1.0" if unmarked else ".".join(str(p) for p in min(versions))
+    return ("Installed upspec scripts in tools/specs/ are %s; "
+            "this plugin is %s: run scaffold_docs.py --update to see what changes." % (installed, UPSPEC_VERSION))
+
+
+def skill_for_artifact(path, docs):
+    """Name the writing skill for a classified artifact, or the review skill."""
+    return {"use_case": "up-5-writing-use-case-specs", "overview": "up-4-mapping-use-cases",
+            "requirements": "up-2-cataloging-requirements", "entity_model": "up-3-modeling-domain-entities",
+            "test_case": "up-writing-journey-test-cases", "change_record": "up-1-triaging-change-requests"
+            }.get(docs.kind(path), "up-6-reviewing-specifications")
 
 
 def recovered_ids(docs):
@@ -82,6 +166,51 @@ def recovered_ids(docs):
     return ids
 
 
+def alignment_view(root, docs, use_cases):
+    """The alignment backlog of a recovery, or None when its change log has no entry."""
+    if not docs or not docs.recovery_dir:
+        return None
+    entries = model.parse_change_log(os.path.join(docs.recovery_dir, "change-log.md"))
+    if not entries:
+        return None
+    status = {u["id"]: u["status"] for u in use_cases}
+    counts = {"later": 0, "in_change": 0, "aligned": 0, "dropped": 0, "undecided": 0}
+    open_entries, dropped, ready, coded = [], [], [], []
+    for entry in entries:
+        state = entry["state"]
+        errors = [(code, message) for severity, code, message in model.closure_problems(root, entry) if severity == "error"]
+        coded.extend(coded_line(code, "change log #%d is aligned, but %s; it stays open" % (entry["number"], message))
+                     for code, message in errors)
+        if state in counts and not errors:
+            counts[state] += 1
+        if state == "dropped":
+            dropped.append({"number": entry["number"], "state": state, "use_cases": unique(entry["use_cases"]),
+                            "record": None, "ahead": entry["ahead"], "reason": entry["detail"]})
+        if state not in ("later", "in_change") and not errors:
+            continue
+        record = entry["paths"][0] if state == "in_change" and entry["paths"] else None
+        named = model.RE_UC_ID.search(os.path.basename(record)) if record else None
+        ids = unique(([named.group(0)] if named else []) + entry["use_cases"])
+        open_entries.append({"number": entry["number"], "state": state, "use_cases": ids, "record": record, "ahead": entry["ahead"]})
+        if state == "in_change" and ids and all(status.get(uc) in READY for uc in ids):
+            ready.append("change log #%d: %s; its audit report closes it (aligned: <report>)"
+                         % (entry["number"], ", ".join("%s is %s" % (uc, status[uc]) for uc in ids)))
+    return dict(counts, open=len(open_entries), entries=open_entries, ready=ready,
+                warnings=[item["message"] for item in coded],
+                ahead_items=unique([item for e in open_entries for item in e["ahead"]]), abilities=[],
+                dropped_entries=dropped, coded_warnings=coded)
+
+
+def alignment_line(alignment):
+    text = ("Alignment: %(open)d open (%(later)d later, %(in_change)d in change), %(aligned)d aligned, "
+            "%(dropped)d dropped, %(undecided)d undecided" % alignment)
+    if alignment["ahead_items"]:
+        text += "; AHEAD %s" % ", ".join(alignment["ahead_items"])
+    if alignment["abilities"]:
+        text += "; abilities %s" % ", ".join(alignment["abilities"])
+    return text
+
+
 def count_code(root, docs_dir):
     docs_abs = os.path.abspath(docs_dir)
     count = 0
@@ -93,6 +222,11 @@ def count_code(root, docs_dir):
         if count >= CODE_COUNT_CAP:
             break
     return count
+
+
+def coded_line(code, message):
+    """A warning or mismatch as data: its stable code beside its sentence."""
+    return {"code": code, "message": message}
 
 
 def unique(items):
@@ -117,32 +251,60 @@ def focus_of(tracking):
     for item in tracking["next_up"][:1]:
         ids = [uc for ability in tracking["items"].get(item, []) for uc in abilities.get(ability, {}).get("specs", [])]
         if ids:
-            return unique(ids), "AHEAD.md Next up (%s)" % item
+            return unique(ids), "AHEAD.md Next up item %s" % item
     return [], None
 
 
-def tracking_view(root, use_cases):
+def tracking_view(root, use_cases, alignment=None):
     """What the A-files add to the state, or None when the project does not use them."""
     tracking = model.read_tracking(root)
     if tracking is None:
         return None
     known = {u["id"]: u for u in use_cases}
-    warnings, notes, named_by = [], [], {}
+    coded, notes, named_by = [], [], {}
+    compared = 0
+
+    def warn(code, message):
+        coded.append(coded_line(code, message))
+
     for ability, entry in sorted(tracking["abilities"].items()):
         for uc_id in entry["specs"]:
             named_by.setdefault(uc_id, []).append(ability)
             if uc_id not in known:
-                warnings.append("%s names %s in its Specs line, and no such use case exists" % (ability, uc_id))
+                warn("SPECS_UNKNOWN_USE_CASE", "%s names %s in its Specs line, and no such use case exists" % (ability, uc_id))
         named = [known[u] for u in entry["specs"] if u in known]
+        if named and entry["status"] in COMPARED_STATUSES:
+            compared += 1
         if entry["status"] == "done":
             behind = ["%s is %s" % (u["id"], u["status"]) for u in named if u["status"] != "Done"]
             if behind:
-                warnings.append("%s is done, but %s" % (ability, ", ".join(behind)))
+                warn("DONE_ABILITY_NOT_DONE", "%s is done, but %s" % (ability, ", ".join(behind)))
         if entry["status"] == "planned":
             ahead = ["%s is %s" % (u["id"], u["status"]) for u in named if u["status"] in ("Implemented", "Tested", "Done")]
             if ahead:
-                warnings.append("%s is planned, but %s" % (ability, ", ".join(ahead)))
-    if not tracking["abilities_home"]:
+                warn("PLANNED_ABILITY_BUILT", "%s is planned, but %s" % (ability, ", ".join(ahead)))
+        if entry["status"] == "in progress" and named and all(u["status"] == "Done" for u in named):
+            warn("IN_PROGRESS_ABILITY_DONE", "%s is in progress, but every use case it names is Done: %s"
+                 % (ability, ", ".join(u["id"] for u in named)))
+    if alignment:
+        open_on = {}
+        for item in alignment["entries"]:
+            for uc_id in item["use_cases"]:
+                open_on.setdefault(uc_id, []).append(item["number"])
+        alignment["abilities"] = sorted({ab for uc_id in open_on for ab in named_by.get(uc_id, [])})
+        for ability, entry in sorted(tracking["abilities"].items()):
+            left = ["#%d on %s" % (n, uc_id) for uc_id in entry["specs"] for n in open_on.get(uc_id, [])]
+            if entry["status"] == "done" and left:
+                warn("DONE_ABILITY_OPEN_ENTRY", "%s is done, but change log %s %s still open"
+                     % (ability, ", ".join(left), "is" if len(left) == 1 else "are"))
+        if not tracking["ahead_home"]:
+            for item in alignment["entries"]:
+                if item["state"] == "later" and not item["ahead"]:
+                    warn("LATER_WITHOUT_AHEAD", "change log #%d is later and names no AHEAD item: draft its item (the hand-off at the end of the baseline review)" % item["number"])
+                for ahead in item["ahead"]:
+                    if ahead not in tracking["items"]:
+                        warn("AHEAD_ITEM_UNKNOWN", "change log #%d names %s, which AHEAD.md does not list" % (item["number"], ahead))
+    if tracking["abilities_present"] and not tracking["abilities_home"]:
         unnamed = [u["id"] for u in use_cases if u["id"] not in named_by and u["status"] != "Obsolete"]
         if unnamed:
             notes.append("named by no ability: %s" % ", ".join(unnamed))
@@ -155,70 +317,95 @@ def tracking_view(root, use_cases):
     focus, focus_from = focus_of(tracking)
     if focus and all(known.get(u, {}).get("status") == "Done" for u in focus):
         if focus_from == "ACTIVE.md current work":
-            notes.append("every use case of the current work is Done: close it out in ACTIVE.md and ABILITIES.md")
+            notes.append("every use case of the current work is Done: close it out in ACTIVE.md%s"
+                         % (" and ABILITIES.md" if tracking["abilities_present"] else ""))
         else:
             notes.append("every use case of %s is Done: the item can be closed in AHEAD.md" % tracking["next_up"][0])
-    if not focus and not tracking["current_work"] and not tracking["active_home"] and tracking["next_up"]:
+    if (not focus and not tracking["current_work"] and not tracking["active_home"] and tracking["next_up"]
+            and tracking["abilities_present"]):
         notes.append("AHEAD.md's Next up starts with %s, which names no ability with a Specs line" % tracking["next_up"][0])
     mentioned = focus if focus_from == "ACTIVE.md current work" else []
-    mismatches = [] if tracking["active_home"] else [
-        "%s is %s and the current work does not name it" % (u["id"], u["status"])
+    coded_mismatches = [] if tracking["active_home"] else [
+        coded_line("IN_PROGRESS_NOT_CURRENT", "%s is %s and the current work does not name it" % (u["id"], u["status"]))
         for u in use_cases if u["status"] in IN_PROGRESS and u["id"] not in mentioned]
+    abilities = {ability: {"name": entry["name"], "status": entry["status"], "use_cases": list(entry["specs"])}
+                 for ability, entry in sorted(tracking["abilities"].items())}
     return {"current_work": tracking["current_work"], "blocked_by": tracking["blocked_by"],
             "waiting_on_owner": tracking["waiting_on_owner"], "focus": focus, "focus_from": focus_from,
-            "mismatches": mismatches, "warnings": warnings, "notes": notes}
+            "mismatches": [item["message"] for item in coded_mismatches], "warnings": [item["message"] for item in coded],
+            "notes": notes, "next_up": tracking["next_up"], "debt": tracking["debt"],
+            "abilities": abilities, "coded_mismatches": coded_mismatches, "coded_warnings": coded,
+            "abilities_compared": compared}
+
+
+class Unreadable(Exception):
+    """Specification files that cannot be read: files is [(path, error)], and the message names each one, for a caller
+    that shows it (the hook gate)."""
+
+    def __init__(self, files):
+        super().__init__("; ".join("cannot read %s: %s" % (path, error) for path, error in files))
+        self.files = files
 
 
 def collect(docs_dir):
     root = model.project_root(docs_dir)
-    state = {"docs": docs_dir, "docs_exists": os.path.isdir(docs_dir)}
+    notice = update_notice(root)
+    docs = model.Docs(docs_dir)
+    # Every file is looked at for the earlier formats, also past one that cannot be read; the earlier formats win.
+    # A folder the search for change records could not look into and that the method does not own stops nothing:
+    # it is named (not_searched), so that no one takes that search for complete.
+    unreadable, not_searched = [], []
+    earlier = model.old_formats(docs, unreadable, not_searched)
+    if unreadable and not earlier:
+        raise Unreadable(unreadable)
+    not_searched = [{"folder": path, "error": str(error)} for path, error in not_searched]
+    if earlier:
+        # The unreadable files are named beside the migration, as the checks name them beside OLD_FORMAT.
+        return {"docs": docs_dir, "notice": notice, "migration": {
+            "code": "MIGRATE", "skill": "up-migrating-spec-formats", "why": "%d files in earlier formats" % len(earlier),
+            "unreadable": [{"file": path, "error": str(error)} for path, error in unreadable]},
+            "not_searched": not_searched}
+    state = {"docs": docs_dir, "docs_exists": os.path.isdir(docs_dir), "notice": notice}
     guideline, profile, skipped = model.read_rules_block(root)
     state["guideline"] = {"file": guideline, "profile": profile,
-                          "skipped": [word for word in ("requirements", "entity model", "diagram") if word in skipped]}
+                          "skipped": [word for word in ("requirements", "entity model", "overview", "diagram") if word in skipped]}
     docs = model.Docs(docs_dir) if state["docs_exists"] else None
     artifacts = {}
     for key, path in (("vision", docs and docs.vision), ("requirements", docs and docs.requirements),
-                      ("entity_model", docs and docs.entity_model), ("diagram", docs and docs.diagram)):
+                      ("entity_model", docs and docs.entity_model), ("diagram", docs and docs.overview)):
         artifacts[key] = {"path": os.path.relpath(path, root) if path else None, "present": bool(path)}
     if docs and docs.vision:
         text = re.sub(r"<!--.*?-->", "", "\n".join(model.read_lines(docs.vision)), flags=re.DOTALL)
         artifacts["vision"]["placeholders"] = len(PLACEHOLDER.findall(text))
+    artifacts["diagram"]["current"] = bool(docs and use_case_map.current(docs))
     state["artifacts"] = artifacts
 
-    use_cases, mismatches = [], []
-    diagram = model.parse_diagram(docs.diagram) if docs and docs.diagram else None
+    use_cases, coded = [], []
     specs = model.load_use_cases(docs) if docs else []
     seen = {}
     for uc in specs:
         rel = os.path.relpath(uc.path, root)
         if not uc.id:
-            mismatches.append("%s has no Use Case ID" % rel)
+            coded.append(coded_line("UC_NO_ID", "%s has no Use Case ID" % rel))
             continue
         if uc.id in seen:
-            mismatches.append("%s is used by %s and %s" % (uc.id, seen[uc.id], rel))
+            coded.append(coded_line("UC_ID_REUSED", "%s is used by %s and %s" % (uc.id, seen[uc.id], rel)))
             continue
         seen[uc.id] = rel
         status = uc.status
         if status not in model.UC_STATUSES:
-            mismatches.append("%s has Status '%s', which is not a Status" % (uc.id, status))
-        if diagram and uc.id not in diagram.use_cases and status != "Obsolete":
-            mismatches.append("%s has a specification and is not in the diagram" % uc.id)
-        if diagram and uc.id in diagram.use_cases and diagram.use_cases[uc.id][0] != uc.name:
-            mismatches.append("%s is '%s' in its specification and '%s' in the diagram" % (uc.id, uc.name, diagram.use_cases[uc.id][0]))
-        step = PER_STATUS.get(status)
+            coded.append(coded_line("UC_STATUS_INVALID", "%s has Status '%s', which is not a Status" % (uc.id, status)))
+        step = (("WRITE", "up-5-writing-use-case-specs", "write the stub's specification")
+                if uc.is_stub else PER_STATUS.get(status))
         use_cases.append({"id": uc.id, "name": uc.name, "status": status, "file": rel,
                           "next": step[0] if step else None, "by": step[1] if step else None, "what": step[2] if step else None})
-    if diagram:
-        for uc_id, (name, _, _) in sorted(diagram.use_cases.items()):
-            if uc_id not in seen:
-                use_cases.append({"id": uc_id, "name": name, "status": "not specified", "file": None, "next": "SPECIFY",
-                                  "by": "up-5-writing-use-case-specs", "what": "write the specification; it starts as Draft"})
     use_cases.sort(key=lambda u: u["id"])
     state["use_cases"] = use_cases
     recovered = recovered_ids(docs)
     state["recovery"] = {"ledger": bool(recovered),
                          "draft": [u["id"] for u in use_cases if u["id"] in recovered and u["status"] == "Draft"]}
-    state["mismatches"] = mismatches
+    state["mismatches"] = [item["message"] for item in coded]
+    state["coded_mismatches"] = coded
 
     unrealized = []
     if docs and docs.requirements:
@@ -230,16 +417,36 @@ def collect(docs_dir):
     state["journey_test_cases"] = len(docs.test_case_files()) if docs else 0
     state["code_files"] = count_code(root, docs_dir)
     state["code_files_capped"] = state["code_files"] >= CODE_COUNT_CAP
-    state["tracking"] = tracking_view(root, use_cases)
+    findings = model.format_findings(docs) if docs else []
+    # A finding blocks when use_case_map.refusals() names its file: the overview cannot be written until it is
+    # repaired. With the overview skipped nothing blocks, as nothing then asks for the overview.
+    refused = set()
+    if docs and not any(word in state["guideline"]["skipped"] for word in ("diagram", "overview")):
+        refused = {os.path.normpath(os.path.relpath(path, root)) for path, _, _ in use_case_map.refusals(specs)}
+    state["format_findings"] = [{"path": os.path.relpath(p, root), "line": l, "code": c, "message": m,
+                                 "blocking": os.path.normpath(os.path.relpath(p, root)) in refused,
+                                 "skill": skill_for_artifact(p, docs)}
+                                 for p, l, c, m in findings]
+    state["alignment"] = alignment_view(root, docs, use_cases)
+    state["tracking"] = tracking_view(root, use_cases, state["alignment"])
+    state["titles"] = model.known_titles(root, docs, specs)
+    state["not_searched"] = not_searched
     return state
+
+
+def named(uc):
+    """A use case as a sentence names it."""
+    return "%s (%s)" % (uc["id"], uc["name"]) if uc["name"] else uc["id"]
 
 
 def decide(state):
     """First matching row wins. Returns the next step as a dict."""
+    if "migration" in state:
+        return state["migration"]
     art, guide, ucs = state["artifacts"], state["guideline"], state["use_cases"]
     skipped = guide["skipped"]
     specified = [u for u in ucs if u["file"]]
-    chain_started = any(art[k]["present"] for k in ("requirements", "entity_model", "diagram")) or bool(specified)
+    chain_started = any(art[k]["present"] for k in ("requirements", "entity_model")) or bool(specified)
 
     def step(code, target, reason, by=None, what=None):
         return {"code": code, "target": target, "by": by or SKILLS.get(code), "reason": reason, "what": what}
@@ -250,6 +457,16 @@ def decide(state):
     def where(name):
         """A file of the specification folder, written as the user passed or recorded the folder."""
         return "%s/%s" % (state["docs"].replace(os.sep, "/").rstrip("/"), name)
+
+    findings = [f for f in state.get("format_findings", []) if f["blocking"]]
+    to_clean = len(state.get("format_findings", [])) - len(findings)
+    if findings:
+        finding = findings[0]
+        skill = finding["skill"]
+        names_and_codes = ", ".join(sorted({"%s (%s)" % (f["path"], f["code"]) for f in findings}))
+        return step("FIX_FORMAT", finding["path"],
+                    "%d format finding(s): %s" % (len(findings), names_and_codes),
+                    by=skill, what="repair the reported format findings using %s" % skill)
 
     if not guide["file"] and not art["vision"]["present"] and not chain_started:
         return step("SETUP", None, "no rules block in a guideline file, no vision and no specifications")
@@ -271,44 +488,68 @@ def decide(state):
         return step("REQUIREMENTS", where("requirements.md"), "the requirements catalog is missing and not recorded as skipped")
     if not art["entity_model"]["present"] and "entity model" not in skipped:
         return step("ENTITY_MODEL", where("entity_model.md"), "the entity model is missing and not recorded as skipped; it comes before any use case")
-    if not art["diagram"]["present"] and "diagram" not in skipped:
-        return step("DIAGRAM", where("use_cases.puml"), "the use case diagram is missing and not recorded as skipped")
+    # A use case with no ID, an ID used twice or a Status that is not a Status spoils the overview: repair it first.
     if state["mismatches"]:
-        return step("FIX", None, "diagram and specifications disagree: %s" % state["mismatches"][0], what="run the specification lint and repair what it reports")
+        return step("FIX", None, "specification files need repair: %s" % state["mismatches"][0], what="run the specification lint and repair what it reports")
+    if (not art["diagram"]["present"] or not art["diagram"]["current"]) and not any(k in skipped for k in ("diagram", "overview")):
+        return step("DIAGRAM", where("use_cases.md"), "the use case overview is missing or stale and not recorded as skipped")
     tracking = state.get("tracking")
     if tracking and tracking["focus"]:
         focus = [u for u in ucs if u["id"] in tracking["focus"]]
-        for code in ("TEST", "IMPLEMENT", "APPROVE", "REVIEW", "SPECIFY", "BUSINESS_REVIEW"):
+        for code in ("TEST", "IMPLEMENT", "APPROVE", "WRITE", "REVIEW", "SPECIFY", "BUSINESS_REVIEW"):
             uc = next((u for u in focus if u["next"] == code), None)
             if uc:
-                return step(code, uc["id"], "%s %s has Status %s; %s names it" % (uc["id"], uc["name"], uc["status"], tracking["focus_from"]),
+                return step(code, uc["id"], "%s has Status %s; %s names it" % (named(uc), uc["status"], tracking["focus_from"]),
                             by=uc["by"], what=uc["what"])
-    for code in ("TEST", "IMPLEMENT", "APPROVE", "REVIEW", "SPECIFY"):
+    for code in ("TEST", "IMPLEMENT", "APPROVE", "WRITE", "REVIEW", "SPECIFY"):
         uc = first(code)
         if uc:
-            return step(code, uc["id"], "%s %s has Status %s" % (uc["id"], uc["name"], uc["status"]), by=uc["by"], what=uc["what"])
+            return step(code, uc["id"], "%s has Status %s" % (named(uc), uc["status"]), by=uc["by"], what=uc["what"])
     if not specified:
         return step("SPECIFY", None, "no use case is specified yet", what="specify the first use case: one behavior that is contested or unclear today")
     if state["requirements_without_use_case"]:
         return step("MAP", state["requirements_without_use_case"][0],
-                    "no use case realizes %s" % ", ".join(state["requirements_without_use_case"]), what="add the missing use case to the diagram, or defer the requirement")
+                    "no use case realizes %s" % ", ".join(state["requirements_without_use_case"]), what="add the missing use case file and regenerate the overview, or defer the requirement")
     tested = [u for u in ucs if u["status"] in ("Tested", "Done")]
     if len(tested) >= 2 and not state["journey_test_cases"]:
         return step("JOURNEY", None, "%d use cases are Tested or Done and no journey test case chains them" % len(tested),
                     what="write a journey test case where use cases hand state to each other")
     uc = first("BUSINESS_REVIEW")
     if uc:
-        return step("BUSINESS_REVIEW", uc["id"], "%s %s has Status Tested" % (uc["id"], uc["name"]), by=uc["by"], what=uc["what"])
-    return step("IDLE", None, "every use case is Done", what="nothing is in flight; the next request is classified as a change")
+        return step("BUSINESS_REVIEW", uc["id"], "%s has Status Tested" % named(uc), by=uc["by"], what=uc["what"])
+    return step("IDLE", None, "Nothing in flight; %d item(s) to clean." % to_clean if to_clean else "every use case is Done",
+                what="nothing is in flight; the next request is classified as a change")
+
+
+def not_searched_lines(state):
+    """A note for each folder the search for change records could not look into, which stops nothing."""
+    return ["note: %s was not searched for change records: %s" % (entry["folder"], entry["error"])
+            for entry in state.get("not_searched", [])]
 
 
 def print_text(state):
+    if "migration" in state:
+        nxt = state["migration"]
+        print("Next step: %s" % nxt["code"])
+        if state.get("notice"):
+            print(state["notice"])
+        print("  by: %s\n  reason: %s" % (nxt["skill"], nxt["why"]))
+        for entry in nxt.get("unreadable", []):
+            print("  unreadable: %s: %s" % (entry["file"], entry["error"]))
+        return
     guide = state["guideline"]
+
+    def say(text):
+        """A line a person reads: each identifier with its title."""
+        return model.with_titles(text, state.get("titles", {}))
+
     print("Profile: %s%s" % (guide["profile"] or "not recorded", " (%s)" % guide["file"] if guide["file"] else " (no rules block found in AGENTS.md or CLAUDE.md)"))
+    if state.get("notice"):
+        print(state["notice"])
     if guide["skipped"]:
         print("Skipped: %s" % ", ".join(guide["skipped"]))
     print("Artifacts")
-    for key, label in (("vision", "vision"), ("requirements", "requirements catalog"), ("entity_model", "entity model"), ("diagram", "use case diagram")):
+    for key, label in (("vision", "vision"), ("requirements", "requirements catalog"), ("entity_model", "entity model"), ("diagram", "use case overview")):
         item = state["artifacts"][key]
         note = item["path"] if item["present"] else "missing"
         if key == "vision" and item.get("placeholders"):
@@ -324,31 +565,60 @@ def print_text(state):
     if state["mismatches"]:
         print("Mismatches")
         for item in state["mismatches"]:
-            print("  %s" % item)
+            print("  %s" % say(item))
+    blocking = [f for f in state.get("format_findings", []) if f["blocking"]]
+    if blocking:
+        print("Format findings")
+        for f in blocking:
+            print("  %s:%d: %s: %s" % (f["path"], f["line"], f["code"], f["message"]))
     nxt = state["next"]
     print()
-    print("Next step: %s%s" % (nxt["code"], " " + nxt["target"] if nxt["target"] else ""))
+    print(say("Next step: %s%s" % (nxt["code"], " " + nxt["target"] if nxt["target"] else "")))
     print("  by:     %s" % nxt["by"])
-    print("  reason: %s" % nxt["reason"])
+    print("  reason: %s" % say(nxt["reason"]))
+    print("  when:   no other task is in hand; a fix, change or feature on an existing use case goes to up-1 first")
     if nxt["what"]:
         print("  what:   %s" % nxt["what"])
+    to_clean = [f for f in state.get("format_findings", []) if not f["blocking"]]
+    if to_clean:
+        files = len({f["path"] for f in to_clean})
+        print()
+        print('To clean (not blocking): %d format finding%s in %d file%s. Say "clean the specs" to fix them.'
+              % (len(to_clean), "" if len(to_clean) == 1 else "s", files, "" if files == 1 else "s"))
+
+    alignment = state.get("alignment")
+    if alignment and any(alignment[key] for key in ("open", "aligned", "dropped", "undecided")):
+        print()
+        print(say(alignment_line(alignment)))
+        for warning in alignment["warnings"]:
+            print("  warning: %s" % say(warning))
+        for hint in alignment["ready"]:
+            print("  ready: %s" % say(hint))
 
     tracking = state.get("tracking")
     if tracking:
         print()
         print("Tracking (A-files)")
-        print("  current work:     %s%s" % (tracking["current_work"] or "none",
-                                            "  (focus: %s, from %s)" % (", ".join(tracking["focus"]), tracking["focus_from"]) if tracking["focus"] else ""))
+        print(say("  current work:     %s%s" % (tracking["current_work"] or "none",
+                                                "  (focus: %s, from %s)" % (", ".join(tracking["focus"]), tracking["focus_from"]) if tracking["focus"] else "")))
         if tracking["blocked_by"]:
-            print("  blocked by:       %s" % tracking["blocked_by"])
+            print("  blocked by:       %s" % say(tracking["blocked_by"]))
         if tracking["waiting_on_owner"]:
-            print("  waiting on owner: %s" % tracking["waiting_on_owner"])
+            print("  waiting on owner: %s" % say(tracking["waiting_on_owner"]))
         for line in tracking["mismatches"]:
-            print("  mismatch:         %s" % line)
+            print("  mismatch:         %s" % say(line))
         for line in tracking["warnings"]:
-            print("  warning:          %s" % line)
+            print("  warning:          %s" % say(line))
         for line in tracking["notes"]:
-            print("  note:             %s" % line)
+            print("  note:             %s" % say(line))
+        if tracking["next_up"]:
+            print("  Next up:          %s" % say(", ".join(tracking["next_up"])))
+        if tracking["debt"]:
+            print("  Debt:")
+            for line in tracking["debt"][:DEBT_SHOWN]:
+                print("    - %s" % say(line))
+            if len(tracking["debt"]) > DEBT_SHOWN:
+                print("    and %d more" % (len(tracking["debt"]) - DEBT_SHOWN))
 
 
 def main(argv):
@@ -362,12 +632,20 @@ def main(argv):
         return 2
     try:
         state = collect(args.docs)
+    except Unreadable as exc:
+        for path, error in exc.files:
+            print("cannot read the specifications: %s: %s" % (path, error), file=sys.stderr)
+        return 2
     except (OSError, UnicodeDecodeError) as exc:
         print("cannot read the specifications: %s" % exc, file=sys.stderr)
         return 2
     state["next"] = decide(state)
+    # A folder the search for change records could not look into stops nothing; a note on standard error names it, in
+    # either format, beside the JSON key.
+    for line in not_searched_lines(state):
+        print(line, file=sys.stderr)
     if args.format == "json":
-        print(json.dumps(state, indent=2, ensure_ascii=False))
+        model.print_data(state)
     else:
         print_text(state)
     return 0

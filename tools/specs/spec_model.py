@@ -1,6 +1,6 @@
 """Shared reader for specification files of a spec-driven project.
 
-Parses the requirements catalog, the entity model, the use case diagram, use
+Parses the requirements catalog, the entity model, use
 case specifications and journey test cases into plain objects, and gives every
 script one way to report findings. Every skill that ships scripts carries an
 identical copy of this module.
@@ -9,13 +9,27 @@ All files are read as data. Nothing here writes to a project.
 
 Requires Python 3.9+, standard library only.
 """
+import codecs
 import difflib
+import errno
+import glob
+import hashlib
+import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
+import unicodedata
+from typing import NamedTuple, Optional
+
+# the release these copies belong to; hook_gate.py refuses siblings of another release
+UPSPEC_VERSION = "1.8.1"
 
 # --- vocabulary -------------------------------------------------------------
+
+# These artifact kinds can support a behavior change in the spec-first guard.
+SPEC_KINDS = ("use_case", "test_case", "process", "overview", "requirements", "entity_model")
 
 UC_STATUSES = ("Draft", "Reviewed", "Approved", "Implemented", "Tested", "Done", "Obsolete")
 TC_STATUSES = ("Draft", "Reviewed", "Approved", "Automated", "Obsolete")
@@ -24,7 +38,44 @@ REQ_SCOPE = ("Deferred", "Rejected")
 # Position of a use case Status in the lifecycle; Obsolete is outside it.
 STATUS_RANK = {name: rank for rank, name in enumerate(UC_STATUSES[:-1])}
 
-DATA_TYPES = ("Long", "String", "Integer", "Decimal", "Boolean", "Date", "DateTime")
+FIELD_KEYS = {"Use Case ID": "id", "Use Case Name": "name", "Primary Actor": "primary_actor",
+              "Secondary Actors": "secondary_actors", "Goal": "goal", "Trigger": "trigger",
+              "Status": "status", "Requirements": "requirements",
+              "ID": "id", "Priority": "priority", "Process": "process"}
+UC_REQUIRED_KEYS = ("id", "name", "primary_actor", "goal", "trigger", "status", "requirements")
+TC_REQUIRED_KEYS = ("id", "goal", "priority", "status", "use_cases")
+RECORD_REQUIRED_SECTIONS = ("Context", "Decision", "Specification change", "Consequences")
+RECORD_OPTIONAL_SECTIONS = ("Sources of new behavior", "Assumptions", "Reproduction", "Urgent path")
+RECORD_OUTCOMES = ("1", "2", "3", "4", "5", "6", "7", "migration")
+STUB_TEXT = "Not written yet."
+ENTITY_TYPES = ("Text", "Number", "Money", "Date", "Date and time", "Yes/No", "Identifier")
+RE_REFERENCE = re.compile(r"^Reference to ([A-Z][A-Z0-9_]*)$")
+RE_CHOICE = re.compile(r"^Choice of \S.*$")
+# EARS: an optional While/Where clause, then an optional When clause or If ... then, then a subject and
+# 'shall' with a non-empty response. Clauses may hold commas (the lazy match backtracks to the comma
+# that ends the clause); the response's subject may be any noun phrase, not only 'the system'.
+RE_EARS = re.compile(r"^(?:(?:while|where)\s+.+?,\s*)?(?:when\s+.+?,\s*|if\s+.+?,\s*then\s+)?"
+                     r"(?!(?:when|while|where|if|then)\b)[^,\s][^,]*?\s+shall\s+\S", re.IGNORECASE)
+RE_GHERKIN_STEP = re.compile(r"^\s*(Given|When|Then|And|But)\s+(\S.*?)\s*$")
+# A comment line that starts with use case ids annotates the next step: "# UC-001", "# UC-001, UC-002",
+# "# UC-001 Book Repair". Any other comment line is ignored.
+RE_GHERKIN_ANNOTATION = re.compile(r"^\s*#\s*(UC-\d{3}(?:\s*,\s*UC-\d{3})*)\b")
+# A flow such a comment names right after a use case id it annotates: "# UC-001 A15". The flow is kept as data
+# (Scenario.named_flows); it adds no check.
+RE_ANNOTATED_FLOW = re.compile(r"\b(UC-\d{3})\s+([Aa]\d+)\b")
+
+
+def entity_type_ok(text):
+    text = text.strip()
+    return text in ENTITY_TYPES or bool(RE_REFERENCE.match(text)) or bool(RE_CHOICE.match(text))
+
+
+def ears_ok(text):
+    return bool(RE_EARS.match(text.strip()))
+
+
+def _as_text(value):
+    return ", ".join(value) if isinstance(value, list) else (value or "")
 
 # Words that mark a decision nobody made. Matched as whole words, case-insensitive.
 WEAK_WORDS = (
@@ -123,17 +174,299 @@ class Reporter:
         stream.write("%d errors, %d warnings, %d infos\n" % (self.count("ERROR"), self.count("WARN"), self.count("INFO")))
 
     def exit_code(self, strict=False):
-        if self.count("ERROR") or (strict and self.count("WARN")):
+        """0 when the check ran, whatever it found, an unreadable file included; with strict, 1 on any error or
+        warning."""
+        if strict and (self.count("ERROR") or self.count("WARN")):
             return 1
         return 0
+
+
+# --- data printed as JSON -----------------------------------------------------
+
+def data_text(value, encoding=None, ascii_only=False):
+    """value as the indented JSON a command prints as data, for an output of the given encoding.
+
+    An output that writes Unicode (UTF-8, UTF-16 or UTF-32; None for a text buffer) gets every character as it
+    is. Any other, such as a legacy Windows code page, gets plain ASCII with JSON's \\u escapes, which every
+    ASCII-compatible decoding reads alike, so a program that decodes it as UTF-8 reads the same data. A lone
+    surrogate, which a name that is not UTF-8 decodes to and no encoding writes, is escaped the same way. The text
+    is valid JSON whatever the encoding. With ascii_only, every output gets plain ASCII: the bytes of a command that
+    printed its JSON so before (scope_audit.py), which keeps them."""
+    if ascii_only:
+        return json.dumps(value, indent=2)
+    text = json.dumps(value, indent=2, ensure_ascii=False)
+    try:
+        if codecs.lookup(encoding or "utf-8").name.startswith("utf"):
+            text.encode(encoding or "utf-8")
+            return text
+    except (LookupError, UnicodeEncodeError):
+        pass
+    return json.dumps(value, indent=2)
+
+
+def print_data(value, stream=None, ascii_only=False):
+    """Print value as JSON on standard output (or stream): data_text for the stream's encoding (plain ASCII with
+    ascii_only). Every command that prints JSON as data prints it here."""
+    stream = stream or sys.stdout
+    stream.write(data_text(value, getattr(stream, "encoding", None), ascii_only) + "\n")
+
+
+# The error handlers that never end a write in an encoding error. Every other one can: strict, surrogateescape (which
+# a C locale gives standard output), surrogatepass on an encoding other than UTF, and any a program registers.
+SAFE_ERRORS = ("backslashreplace", "namereplace", "xmlcharrefreplace", "replace", "ignore")
+ESCAPED = "+backslashreplace"
+
+
+def _escaping(errors):
+    """The name of an error handler that writes a character as the handler errors writes it, and as its Python escape
+    (\\u2192) where that handler would end the write in an error; registered on first use."""
+    name = errors + ESCAPED
+    try:
+        codecs.lookup_error(name)
+    except LookupError:
+        original = codecs.lookup_error(errors)
+
+        def handler(exc):
+            if not isinstance(exc, UnicodeEncodeError):
+                return original(exc)
+            one = UnicodeEncodeError(exc.encoding, exc.object, exc.start, exc.start + 1, exc.reason)
+            try:
+                return original(one)
+            except UnicodeEncodeError:
+                return codecs.backslashreplace_errors(one)
+
+        codecs.register_error(name, handler)
+    return name
+
+
+def writable_output(*streams):
+    """Make standard output and standard error (or the streams given) write any text. A character the stream's
+    encoding cannot write, as on a legacy Windows code page or under a C locale, is written as its Python escape
+    (\\u2192 for an arrow) instead of ending the command in an encoding error; every other character is written as it
+    is. A stream keeps what its error handler does where that handler writes a character: under surrogateescape, a
+    name that is not text in the encoding is still written as its bytes. A handler that never raises, and UTF with
+    surrogatepass, which writes every character, are left as they are. Every script that imports this module gets it
+    when it imports it (below); JSON goes through print_data, which gives such a stream plain ASCII, so the escapes in
+    it are JSON's."""
+    for stream in streams or (sys.stdout, sys.stderr):
+        errors, encoding = getattr(stream, "errors", None), getattr(stream, "encoding", None) or ""
+        if not errors or errors in SAFE_ERRORS or errors.endswith(ESCAPED) or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            if errors == "surrogatepass" and codecs.lookup(encoding).name.startswith("utf"):
+                continue
+            stream.reconfigure(errors="backslashreplace" if errors == "strict" else _escaping(errors))
+        except (LookupError, ValueError, OSError):
+            pass
+
+
+writable_output()
 
 
 # --- low-level reading ------------------------------------------------------
 
 def read_lines(path):
     """Return the lines of a text file, or raise OSError with the path in the message."""
-    with open(path, encoding="utf-8") as handle:
-        return handle.read().split("\n")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().split("\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        exc.spec_path = path
+        raise
+
+
+OLD_FORMAT_EXIT = 5
+
+RE_FM_KEY = re.compile(r"^([a-z][a-z0-9_]*):(?:[ \t]+(.*?))?[ \t]*$")
+# YAML's block scalar indicators: a value that starts with one of these runs on below its key.
+FM_BLOCK_START = ("|", ">")
+FM_REFUSED_START = {"&": "an anchor", "*": "an alias", "!": "a tag", "{": "a mapping",
+                    **{start: "a multi-line value" for start in FM_BLOCK_START}}
+# What to say instead of a value on several lines, for the keys where more than "write it on one line" helps:
+# a goal that does not fit one line is usually two goals; a use case or journey whose
+# id cannot be read cannot be identified, so nothing that cites it is checked against it.
+FM_ONE_LINE_ADVICE = {
+    "goal": "write the goal on one line; a goal that needs more is usually two goals",
+    "id": "write the id on one line; until then the file cannot be identified, and what cites it is not checked",
+}
+
+
+def _fm_one_line(key):
+    """What to do instead of a value on several lines (FM_ONE_LINE_ADVICE, or the plain advice)."""
+    return FM_ONE_LINE_ADVICE.get(key, "write '%s' on one line" % key)
+
+
+def _fm_comment(raw):
+    """Strip a ' #' comment. A quote counts only where a value or a list item starts, so an apostrophe
+    inside a plain value (customer's bike) never hides a comment."""
+    quote, at_start = None, True
+    for index, char in enumerate(raw):
+        if quote:
+            if char == quote:
+                quote, at_start = None, False
+            continue
+        if char in "\"'" and at_start:
+            quote = char
+        elif char == "#" and (index == 0 or raw[index - 1] in " \t"):
+            return raw[:index].rstrip()
+        at_start = char in "[," or (char in " \t" and at_start)
+    return raw
+
+
+def _fm_scalar(raw):
+    """(value, problem). A quoted string loses its quotes; a plain one is kept as written."""
+    raw = raw.strip()
+    if raw and raw[:1] in "\"'":
+        quote = raw[0]
+        if len(raw) < 2 or raw[-1] != quote or quote in raw[1:-1]:
+            return None, "a quote that does not wrap the whole value (no escapes in the subset)"
+        return raw[1:-1], None
+    if raw[:1] in FM_REFUSED_START:
+        return None, "%s is outside the subset" % FM_REFUSED_START[raw[0]]
+    if raw and (raw[:1] in "[]" or "]" in raw):
+        return None, "a nested list is outside the subset"
+    if re.search(r":[ \t]", raw) or raw.endswith(":"):
+        return None, "a plain value with ': ' in it; quote it"
+    return raw, None
+
+
+def _fm_value(raw):
+    if raw.startswith("["):
+        if not raw.endswith("]"):
+            return None, "a list must open and close on one line"
+        if not raw[1:-1].strip():
+            return [], None
+        items, current, quote, at_start = [], "", None, True
+        for char in raw[1:-1]:
+            if quote:
+                if char == quote:
+                    quote = None
+            elif char in "\"'" and at_start:
+                quote = char
+            elif char in "[]":
+                return None, "a nested list is outside the subset"
+            elif char == ",":
+                items.append(current)
+                current, at_start = "", True
+                continue
+            current += char
+            at_start = at_start and char in " \t"
+        items.append(current)
+        values = []
+        for item in items:
+            if not item.strip():
+                return None, "an empty list item is outside the subset"
+            value, problem = _fm_scalar(item)
+            if problem:
+                return None, problem
+            values.append(value)
+        return values, None
+    return _fm_scalar(raw) if raw else ("", None)
+
+
+class FrontMatter:
+    """One reading of a file's front matter.
+
+    meta maps key -> (value, line); body_start is the 0-based index of the first line after the closing
+    '---'; problems lists (line, message), the subset's refusals and then the shape of list and scalar keys;
+    refused maps each key refused as a value on several lines to the line of its refusal, which is that key's
+    one finding (no "required key ... is missing" beside it)."""
+
+    def __init__(self, meta=None, body_start=0, problems=None, refused=None):
+        self.meta = meta if meta is not None else {}
+        self.body_start = body_start
+        self.problems = problems if problems is not None else []
+        self.refused = refused if refused is not None else {}
+
+
+def front_matter(lines):
+    """The front matter of a file's lines, as one FrontMatter."""
+    meta, body_start, problems, refused = _read_subset(lines)
+    return FrontMatter(meta, body_start, problems + shape_problems(meta), refused)
+
+
+def read_front_matter(lines):
+    """Read the front matter subset of the current formats: (data, body_start, problems), the subset's own
+    refusals only (front_matter() adds the shape of the keys and the refused keys)."""
+    return _read_subset(lines)[:3]
+
+
+def _read_subset(lines):
+    """(data, body_start, problems, refused).
+
+    data maps key -> (value, line), value a string or a list of strings; body_start is the 0-based index of
+    the first line after the closing '---' (0 when there is no front matter); problems lists (line, message).
+    The subset: 'key: value', 'key: [a, b]', quoted strings, '#' comments. Nesting, anchors, tags and
+    multi-line values are refused, never guessed.
+
+    A value on several lines is one problem, with the advice to write it on one line, and its key is not read:
+    a block scalar ('|', '>') at its key's line; a value refused on its key's line for another reason (a quote,
+    a tag, ': ') and continued on indented lines, at its key's line too; a plain value continued on indented
+    lines, at the first continued line. Its other lines add nothing. refused maps each key refused this way to
+    the line of that problem.
+    """
+    clean = [line.rstrip("\r") for line in lines]
+    if clean:
+        clean[0] = clean[0].lstrip("﻿")
+    if not clean or clean[0].strip() != "---":
+        return {}, 0, [], {}
+    data, problems, refused = {}, [], {}
+    # last_key: the key the next indented line would continue; refused_at: index in problems of its refusal,
+    # when its value was refused on its own line.
+    last_key, refused_at = None, None
+    for index in range(1, len(clean)):
+        number, text = index + 1, clean[index]
+        stripped = text.strip()
+        if stripped == "---":
+            return data, index + 1, problems, refused
+        if not stripped or stripped.startswith("#"):
+            continue
+        if text[:1] in " \t":
+            if last_key is None:
+                problems.append((number, "an indented line: nested or continued values are outside the subset"))
+            elif last_key in refused:
+                pass
+            elif refused_at is not None:
+                line, problem = problems[refused_at]
+                problems[refused_at] = (line, "%s, and the value continues on an indented line: %s"
+                                        % (problem, _fm_one_line(last_key)))
+                refused[last_key] = line
+            else:
+                problems.append((number, "an indented line continues '%s'; nested or continued values are outside "
+                                         "the subset: %s" % (last_key, _fm_one_line(last_key))))
+                refused[last_key] = number
+                data.pop(last_key, None)
+            continue
+        match = RE_FM_KEY.match(text)
+        if not match:
+            problems.append((number, "not a 'key: value' line"))
+            last_key, refused_at = None, None
+            continue
+        key, raw = match.group(1), _fm_comment(match.group(2) or "")
+        if key in data:
+            problems.append((number, "key '%s' appears twice" % key))
+            last_key, refused_at = None, None
+            continue
+        last_key, refused_at = key, None
+        value, problem = _fm_value(raw)
+        if problem:
+            if raw.startswith(FM_BLOCK_START):
+                problem = "%s: %s" % (problem, _fm_one_line(key))
+                refused[key] = number
+            else:
+                refused_at = len(problems)
+            problems.append((number, problem))
+            continue
+        data[key] = (value, number)
+    problems.append((1, "front matter is not closed with '---'"))
+    return data, 0, problems, refused
+
+LIST_KEYS = ("secondary_actors", "requirements", "use_cases")
+
+
+def shape_problems(meta):
+    return [(line, "key '%s' must hold %s" % (key, "a list" if key in LIST_KEYS else "a scalar"))
+            for key, (value, line) in meta.items() if isinstance(value, list) != (key in LIST_KEYS)]
 
 
 def outside_fences(lines):
@@ -154,8 +487,13 @@ def table_cells(line):
     return [cell.strip() for cell in text[1:-1].split("|")]
 
 
+def table_separator(cells):
+    """Every column needs a Markdown separator; empty cells are invalid."""
+    return bool(cells) and all(re.fullmatch(r":?-{2,}:?", c) for c in cells)
+
+
 def read_tables(lines):
-    """Return Markdown tables as dicts: {'line', 'header', 'rows': [(line, {column: cell}, cell count)]}."""
+    """Return Markdown tables as dicts: {'line', 'header', 'separator', 'rows': [(line, {column: cell}, cell count)]}."""
     tables, current = [], None
     for number, line in outside_fences(lines):
         cells = table_cells(line)
@@ -163,9 +501,10 @@ def read_tables(lines):
             current = None
             continue
         if current is None:
-            current = {"line": number, "header": cells, "rows": []}
+            current = {"line": number, "header": cells, "separator": None, "rows": []}
             tables.append(current)
-        elif all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c) and not current["rows"]:
+        elif number == current["line"] + 1 and table_separator(cells):
+            current["separator"] = (number, cells)
             continue    # separator row
         else:
             padded = cells + [""] * (len(current["header"]) - len(cells))
@@ -219,6 +558,18 @@ def is_retired(name):
     return bool(re.match(r"retired\b", (name or "").strip(), re.IGNORECASE))
 
 
+# Where a retired rule or flow says it went: the text after 'moved to', without a closing full stop.
+RE_MOVED_TO = re.compile(r"\bmoved\s+to\s+(.*?)\s*\.?\s*$", re.IGNORECASE)
+
+
+def moved_to(name):
+    """What a retired rule or flow says it moved to ('UC-022 BR-025'), or None: not retired, or no target named."""
+    if not is_retired(name):
+        return None
+    match = RE_MOVED_TO.search(name.strip())
+    return match.group(1) if match and match.group(1) else None
+
+
 def local_links(lines):
     """Relative link targets in Markdown text: [(line number, target without its #anchor)].
 
@@ -235,10 +586,8 @@ def local_links(lines):
     return found
 
 
-def read_rules_block(root):
-    """The spec-first rules block of a project's guideline file: (file name or None, profile or None, skipped words, lowercase).
-
-    AGENTS.md is read before CLAUDE.md; the first file that carries the block wins."""
+def _rules_block_text(root) -> tuple[Optional[str], Optional[str]]:
+    """The first guideline file carrying the rules heading, and the text after it."""
     for name in ("AGENTS.md", "CLAUDE.md"):
         path = os.path.join(root, name)
         if not os.path.isfile(path):
@@ -247,16 +596,35 @@ def read_rules_block(root):
             text = "\n".join(read_lines(path))
         except (OSError, UnicodeDecodeError):
             continue
-        if RULES_HEADING not in text:
-            continue
-        block = text.split(RULES_HEADING, 1)[1]
-        profile = re.search(r"^\*\*Profile:\*\*\s*(solo|team)\b", block, re.MULTILINE | re.IGNORECASE)
-        skipped = re.search(r"^\*\*Skipped:\*\*\s*(.+)$", block, re.MULTILINE | re.IGNORECASE)
-        return name, (profile.group(1).lower() if profile else None), (skipped.group(1).lower() if skipped else "")
-    return None, None, ""
+        if RULES_HEADING in text:
+            return name, text.split(RULES_HEADING, 1)[1]
+    return None, None
+
+
+def read_rules_block(root):
+    """The spec-first rules block of a project's guideline file: (file name or None, profile or None, skipped words, lowercase).
+
+    AGENTS.md is read before CLAUDE.md; the first file that carries the block wins."""
+    name, block = _rules_block_text(root)
+    if block is None:
+        return None, None, ""
+    profile = re.search(r"^\*\*Profile:\*\*\s*(solo|team)\b", block, re.MULTILINE | re.IGNORECASE)
+    skipped = re.search(r"^\*\*Skipped:\*\*\s*(.+)$", block, re.MULTILINE | re.IGNORECASE)
+    return name, (profile.group(1).lower() if profile else None), (skipped.group(1).lower() if skipped else "")
 
 
 RE_SPECS_FOLDER = re.compile(r"^\*\*Specs folder:\*\*\s*`?([^`\s]+?)`?\s*$", re.MULTILINE | re.IGNORECASE)
+
+
+# The integration branch line shared by setup and change-base resolution.
+RE_INTEGRATION_BRANCH = re.compile(r"^\*\*Integration branch:\*\*\s*`?([^`\s]+?)`?\s*$", re.MULTILINE | re.IGNORECASE)
+
+
+def integration_branch(root=".") -> Optional[str]:
+    """The integration branch in the first guideline file carrying the rules block, or None."""
+    _, block = _rules_block_text(root)
+    match = RE_INTEGRATION_BRANCH.search(block) if block is not None else None
+    return match.group(1) if match else None
 
 
 def recorded_docs(root="."):
@@ -265,28 +633,18 @@ def recorded_docs(root="."):
     A folder inside the project, relative to its root (docs, specs, documentation/specs); a path that leaves the
     root, directly or through a symbolic link, is ignored. The first guideline file that carries the rules block
     decides, as for the profile."""
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        path = os.path.join(root, name)
-        if not os.path.isfile(path):
-            continue
-        try:
-            text = "\n".join(read_lines(path))
-        except (OSError, UnicodeDecodeError):
-            continue
-        if RULES_HEADING not in text:
-            continue
-        match = RE_SPECS_FOLDER.search(text.split(RULES_HEADING, 1)[1])
-        if not match:
-            return None
-        folder = match.group(1).replace("\\", "/").rstrip("/")
-        parts = folder.split("/")
-        real_root = os.path.realpath(root)
-        real = os.path.realpath(os.path.join(root, folder))
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", folder) or any(p in (".", "..") for p in parts) \
-                or not (real == real_root or real.startswith(real_root + os.sep)) or real == real_root:
-            return None
-        return folder
-    return None
+    _, block = _rules_block_text(root)
+    match = RE_SPECS_FOLDER.search(block) if block is not None else None
+    if not match:
+        return None
+    folder = match.group(1).replace("\\", "/").rstrip("/")
+    parts = folder.split("/")
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(os.path.join(root, folder))
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", folder) or any(p in (".", "..") for p in parts) \
+            or not (real == real_root or real.startswith(real_root + os.sep)) or real == real_root:
+        return None
+    return folder
 
 
 def docs_default(root="."):
@@ -296,7 +654,10 @@ def docs_default(root="."):
 
 def project_root(docs_dir):
     """The project's root for a specification folder: the nearest folder above it whose rules block records this
-    folder; else the nearest folder above it that holds AGENTS.md, CLAUDE.md or .git; else its parent."""
+    folder; else the nearest folder above it that holds AGENTS.md, CLAUDE.md or .git, a link that cannot be resolved
+    in its place included; else its parent, or, when something on the way stops a reader before the parent's contents
+    (a link that cannot be resolved, a folder that cannot be searched, the parent included), the folder above the first
+    such folder from the top of the file system."""
     docs_abs = os.path.abspath(docs_dir)
     parent = os.path.dirname(docs_abs)
     probe = parent
@@ -309,11 +670,18 @@ def project_root(docs_dir):
         probe = os.path.dirname(probe)
     probe = parent
     while True:
-        if any(os.path.exists(os.path.join(probe, name)) for name in ("AGENTS.md", "CLAUDE.md", ".git")):
+        if any(os.path.lexists(os.path.join(probe, name)) for name in ("AGENTS.md", "CLAUDE.md", ".git")):
             return probe
         if os.path.dirname(probe) == probe:
-            return parent
+            break
         probe = os.path.dirname(probe)
+
+    # Every part of the path is looked at, from the top of the file system: a missing part behind a link that cannot be
+    # resolved is not absent, and neither is one in a folder that cannot be searched.
+    stop = _first_stop(parent)
+    if stop is None and unsearchable(parent):
+        stop = parent, None
+    return os.path.dirname(stop[0]) if stop else parent
 
 
 # --- the A-files, when the project tracks its work in them ---
@@ -326,6 +694,31 @@ RE_TICKED_PATH = re.compile(r"`([^`\s]+)`")
 A_FILE_NAMES = ("AGENTS.md", "CLAUDE.md", "ACTIVE.md", "ABILITIES.md", "AHEAD.md", "ATLAS.md")
 
 
+# How far into AGENTS.md the A-files' check looks for its index: the cap of its hot zone.
+A_FILES_INDEX_LINES = 100
+TRACKED_A_FILES = ("ACTIVE.md", "ABILITIES.md", "AHEAD.md", "ATLAS.md")
+
+
+def a_files_listed(agents_lines):
+    """The A-files the index of AGENTS.md lists, read as the A-files' check reads it: the rows of the tables in
+    its first 100 lines whose first cell is an A-file's name (in backticks, as a link, or after ./); fenced
+    blocks are examples. An AGENTS.md with no such row names its files in prose, and every A-file named in
+    those lines is listed."""
+    lines = agents_lines[:A_FILES_INDEX_LINES]
+    found = set()
+    for table in read_tables(lines):
+        if table["separator"] is None:
+            continue
+        for _, row, _ in table["rows"]:
+            cell = re.sub(r"\]\([^)]*\)", "", row.get(table["header"][0], "")).strip("[]` ")
+            found.add(cell[2:] if cell.startswith("./") else cell)
+    found &= set(TRACKED_A_FILES)
+    if found:
+        return found
+    prose = "\n".join(line for _, line in outside_fences(lines))
+    return {name for name in TRACKED_A_FILES if name in prose}
+
+
 def a_files_present(root):
     """True when ACTIVE.md at the root holds the hot-zone marker."""
     path = os.path.join(root, "ACTIVE.md")
@@ -335,12 +728,20 @@ def a_files_present(root):
         return False
 
 
-def _optional_lines(root, name):
+class OptionalFile(NamedTuple):
+    """A file a project may lack. present: it exists; lines: its lines, [] when it is absent or cannot be read."""
+    present: bool
+    lines: list
+
+
+def _optional_file(root, name):
     path = os.path.join(root, name)
+    if not os.path.isfile(path):
+        return OptionalFile(False, [])
     try:
-        return read_lines(path) if os.path.isfile(path) else []
+        return OptionalFile(True, read_lines(path))
     except (OSError, UnicodeDecodeError):
-        return []
+        return OptionalFile(True, [])
 
 
 def _hot_zone(lines):
@@ -362,6 +763,11 @@ def _field(lines, name):
         if match:
             return "" if _is_empty(match.group(1)) else match.group(1)
     return ""
+
+
+def a_file_home(root, lines):
+    """The tracking file an A-file's hot zone delegates to (**Home:**), or None; lines are the whole A-file."""
+    return _home(root, _hot_zone(lines))
 
 
 def _home(root, lines):
@@ -397,46 +803,119 @@ def _use_case_of(root, link):
     path = os.path.normpath(os.path.join(root, link.split("#", 1)[0]))
     if not os.path.isfile(path):
         return None
-    for line in _optional_lines(os.path.dirname(path), os.path.basename(path))[:20]:
-        match = re.match(r"^\*\*Use Case ID:\*\*\s*(UC-\d{3})", line)
-        if match:
-            return match.group(1)
+    meta, _, _ = read_front_matter(_optional_file(os.path.dirname(path), os.path.basename(path)).lines)
+    value = meta.get("id", ("", 0))[0]
+    if isinstance(value, str) and RE_UC_ID.fullmatch(value):
+        return value
     match = RE_UC_ID.search(os.path.basename(path))
     return match.group(0) if match else None
+
+
+def _debt(hot):
+    """The bullets under `## Debt` in ACTIVE's hot zone, a bullet's continuation lines joined to it (a nested
+    sub-bullet is an indented line, so it is folded into its parent); a placeholder bullet is dropped: none, nothing,
+    a dash (each alone, trailing punctuation allowed), or text that is only `<...>` placeholders (the template's bullet), punctuation and spaces."""
+    bullets, inside = [], False
+    for _, line in outside_fences(hot):
+        if re.match(r"^##\s", line):
+            inside = re.match(r"^##\s+Debt\s*$", line) is not None
+            continue
+        if not inside:
+            continue
+        bullet = re.match(r"^[-*]\s+(.*?)\s*$", line)
+        if bullet:
+            bullets.append(bullet.group(1))
+        elif line.strip() and bullets and line[:1] in " \t":
+            bullets[-1] += " " + line.strip()
+    return [bullet for bullet in bullets
+            if not re.fullmatch(r"(?i)(none|nothing|n/a|—|–|-)?[\W_]*", bullet.strip())
+            and re.search(r"[^\W_]", re.sub(r"<[^<>]*>", "", bullet))]
+
+
+def _next_new_work(hot):
+    """The text under `## Next new work` in ACTIVE's hot zone, its lines joined by spaces, up to the next heading or
+    the `Below:` line; '' when it is empty, says none, or holds only the template's `<...>` placeholder."""
+    lines, inside = [], False
+    for _, line in outside_fences(hot):
+        if re.match(r"^#{1,6}\s", line):
+            inside = re.match(r"^##\s+Next new work\s*$", line) is not None
+            continue
+        if inside and line.strip().startswith("Below:"):
+            break
+        if inside and line.strip():
+            lines.append(line.strip())
+    text = " ".join(lines)
+    return "" if _is_empty(text) or not re.search(r"[^\W_]", re.sub(r"<[^<>]*>", "", text)) else text
+
+
+def _heading_of_line(lines):
+    """For each line number, the `## ` heading above it (outside fences), or None: {line number: heading}."""
+    found, current = {}, None
+    for number, line in outside_fences(lines):
+        heading = re.match(r"^##\s+(.*?)\s*$", line)
+        if heading:
+            current = heading.group(1)
+        found[number] = current
+    return found
 
 
 def read_tracking(root):
     """What the A-files say about the work, or None when the project does not use them.
 
-    current_work, blocked_by, waiting_on_owner: the text of ACTIVE's fields, '' when empty;
-    abilities: {AB id: {name, status, specs (use case ids), links}}; next_up: AH ids in order;
-    items: {AH id: [AB ids]} from AHEAD's index."""
+    current_work, blocked_by, waiting_on_owner, next_step: the text of ACTIVE's fields, '' when empty;
+    next_new_work: the text under ACTIVE's `## Next new work`, '' when empty;
+    abilities: {AB id: {name, status, specs (use case ids), links, known_limits, evidence}}, the status from the
+    ability's row in any index table of ABILITIES.md, else from an old entry's Status line; known_limits and evidence
+    are the text of the entry's Known limits and Evidence lines as written, None without the line;
+    abilities_present: whether ABILITIES.md exists (without it nothing is said about abilities);
+    next_up: AH ids in order; items: {AH id: [AB ids]} from AHEAD's index;
+    item_titles: {AH id: title} from AHEAD's index, else from its Next up line;
+    ahead_items: {AH id: {title, kind, state, abilities, belongs_to, section, line}}: each row of an AHEAD table with
+    the columns ID and Ability (the index and the history), with the `## ` heading it sits under and its line, and
+    the entry's Belongs to line as written (None without one); an entry with no row has kind, state, section and line
+    None; debt: the bullets under ACTIVE's `## Debt`, empty when ACTIVE names another home for the current work."""
     if not a_files_present(root):
         return None
-    hot = _hot_zone(_optional_lines(root, "ACTIVE.md"))
-    abilities_lines = _optional_lines(root, "ABILITIES.md")
-    ahead = _optional_lines(root, "AHEAD.md")
+    hot = _hot_zone(_optional_file(root, "ACTIVE.md").lines)
+    abilities_file = _optional_file(root, "ABILITIES.md")
+    abilities_lines = abilities_file.lines
+    ahead = _optional_file(root, "AHEAD.md").lines
     active_home = _home(root, hot)
     if active_home:
         hot = []                           # the current work lives in the kept file; ACTIVE's own fields are not it
     tracking = {"current_work": _field(hot, "Current work"), "blocked_by": _field(hot, "Blocked by"),
-                "waiting_on_owner": _field(hot, "Waiting on owner"), "abilities": {}, "next_up": [], "items": {},
+                "waiting_on_owner": _field(hot, "Waiting on owner"), "debt": _debt(hot), "abilities": {}, "next_up": [], "items": {}, "item_titles": {},
+                "abilities_present": abilities_file.present,
                 "active_home": active_home, "abilities_home": _home(root, _hot_zone(abilities_lines)),
-                "ahead_home": _home(root, _hot_zone(ahead))}
+                "ahead_home": _home(root, _hot_zone(ahead)),
+                "next_step": _field(hot, "Next step"), "next_new_work": _next_new_work(hot), "ahead_items": {}}
+
+    def ability(identifier, name):
+        """The ability's record, made the first time an entry heading or an index row names it."""
+        return tracking["abilities"].setdefault(identifier, {"name": name, "status": None, "specs": [], "links": [],
+                                                             "known_limits": None, "evidence": None})
+
     current = None
+    running = None      # the Known limits or Evidence line that indented lines below it continue
     for _, line in outside_fences([] if tracking["abilities_home"] else abilities_lines):
         heading = re.match(r"^###\s+(AB-\d{3})\s*(.*?)\s*$", line)
         if heading:
-            current = tracking["abilities"].setdefault(heading.group(1), {"name": heading.group(2), "status": None,
-                                                                         "specs": [], "links": []})
+            current, running = ability(heading.group(1), heading.group(2)), None
             continue
         if line.startswith("#"):
-            current = None
+            current = running = None
             continue
         field = RE_FIELD.match(re.sub(r"^\s*[-*]\s*", "", line))
+        if running and current is not None and not field and line[:1] in " \t" and line.strip():
+            current[running] = (current[running] + "\n" + line.strip()).strip()
+        elif line.strip():
+            running = None
         if current is None or not field:
             continue
         label, value = field.group(1).strip().lower(), field.group(2)
+        if label in ("known limits", "evidence"):
+            running = label.replace(" ", "_")
+            current[running] = value.strip()
         if label == "status":
             current["status"] = value.strip("` ").lower()
         elif label == "specs":
@@ -444,21 +923,804 @@ def read_tracking(root):
                 RE_LINK.findall(value) + [token for token in RE_TICKED_PATH.findall(value) if _is_tracking_path(token)]))
             linked = [_use_case_of(root, link) for link in current["links"]]
             current["specs"] = list(dict.fromkeys(RE_UC_ID.findall(value) + [uc for uc in linked if uc]))
+    # The status lives in the ability's index row, in any index table of the file; an old entry's Status
+    # line read above is the fallback when the row has no status.
+    for table in [] if tracking["abilities_home"] else read_tables(abilities_lines):
+        if not all(column in table["header"] for column in ("ID", "Ability", "Status")):
+            continue
+        for _, row, _ in table["rows"]:
+            identifier, status = row.get("ID", "").strip(), row.get("Status", "").strip("` ").lower()
+            if RE_AB_ID.fullmatch(identifier) and not _is_empty(status):
+                ability(identifier, row.get("Ability", "").strip())["status"] = status
     if tracking["ahead_home"]:
         return tracking
     text = "\n".join(_hot_zone(ahead))
     if "## Next up" in text:
         tracking["next_up"] = RE_AH_ID.findall(text.split("## Next up", 1)[1].split("\n## ", 1)[0])
+    under = _heading_of_line(ahead)
     for table in read_tables(ahead):
         if "ID" in table["header"] and "Ability" in table["header"]:
-            for _, row, _ in table["rows"]:
+            for line, row, _ in table["rows"]:
                 identifier = row.get("ID", "").strip()
                 if RE_AH_ID.fullmatch(identifier):
                     tracking["items"][identifier] = RE_AB_ID.findall(row.get("Ability", ""))
+                    tracking["item_titles"][identifier] = row.get("Title", "").strip()
+                    tracking["ahead_items"][identifier] = {
+                        "title": row.get("Title", "").strip(), "kind": row.get("Kind", "").strip("` ").lower() or None,
+                        "state": row.get("State", "").strip("` ").lower() or None,
+                        "abilities": RE_AB_ID.findall(row.get("Ability", "")), "belongs_to": None,
+                        "section": under.get(line), "line": line}
+    entry = None
+    for _, line in outside_fences(ahead):
+        heading = re.match(r"^###\s+(AH-\d{3})\s*(.*?)\s*$", line)
+        if heading:
+            entry = tracking["ahead_items"].setdefault(heading.group(1), {
+                "title": heading.group(2), "kind": None, "state": None, "abilities": [], "belongs_to": None,
+                "section": None, "line": None})
+            continue
+        if line.startswith("#"):
+            entry = None
+            continue
+        field = RE_FIELD.match(re.sub(r"^\s*[-*]\s*", "", line))
+        if entry is not None and field and field.group(1).strip().lower() == "belongs to":
+            entry["belongs_to"] = field.group(2).strip()
+    if "## Next up" in text:
+        for line in text.split("## Next up", 1)[1].split("\n## ", 1)[0].splitlines():
+            listed = re.match(r"^\s*(?:\d+\.|[-*])\s*(AH-\d{3})\s+(\S.*?)\s*$", line)
+            if listed and not tracking["item_titles"].get(listed.group(1)):
+                tracking["item_titles"][listed.group(1)] = listed.group(2)
     return tracking
 
 
+# An identifier in a sentence: not part of a path, a file name or a longer name, and with no parenthesis after it yet.
+RE_TITLED = re.compile(r"(?<![\w/.-])(?:(?P<top>(?:UC|FR|NFR|C|AB|AH)-\d{3})|(?P<inner>BR-\d{3}|A\d+))(?![\w-]|\.\w| \()")
+REQUIREMENT_TITLE_LIMIT = 70
+
+
+def requirement_title(req):
+    """What a person calls a requirement: its Title, or, for a row with only a need, the need without its reason."""
+    text = (req.title or re.split(r"\s+so that\s+", req.text or "", maxsplit=1)[0]).strip().rstrip(".")
+    if len(text) <= REQUIREMENT_TITLE_LIMIT:
+        return text
+    return text[:REQUIREMENT_TITLE_LIMIT].rsplit(" ", 1)[0] + "..."
+
+
+def known_titles(root, docs=None, specs=None):
+    """{identifier: title} for what a report may name: use cases, their rules and flows under 'UC-001 BR-002' and
+    'UC-001 A1', requirements, abilities and AHEAD items. A placeholder or empty title is left out."""
+    titles = {}
+
+    def add(key, title):
+        title = (title or "").strip()
+        if key and title and not _is_empty(title) and not title.startswith("<"):
+            titles[key] = title
+
+    for uc in specs if specs is not None else (load_use_cases(docs) if docs else []):
+        add(uc.id, uc.name)
+        for rule in uc.rules:
+            add("%s %s" % (uc.id, rule.id), rule.name)
+        for flow in uc.flows:
+            add("%s %s" % (uc.id, flow.label), flow.name)
+    if docs and docs.requirements:
+        for req in parse_requirements(docs.requirements)[0]:
+            add(req.id, requirement_title(req))
+    tracking = read_tracking(root)
+    if tracking:
+        for identifier, entry in tracking["abilities"].items():
+            add(identifier, entry["name"])
+        for identifier, title in tracking["item_titles"].items():
+            add(identifier, title)
+    return titles
+
+
+def with_titles(text, titles):
+    """Text for a person: each identifier followed by its title in parentheses. A rule or flow takes the title it has
+    in the use case named before it in the text. An identifier with no known title stays as it is."""
+    owner = [None]
+
+    def name(match):
+        found = match.group(0)
+        if match.group("top"):
+            if found.startswith("UC-"):
+                owner[0] = found
+            title = titles.get(found)
+        else:
+            title = titles.get("%s %s" % (owner[0], found))
+        return "%s (%s)" % (found, title) if title else found
+
+    return RE_TITLED.sub(name, text)
+
+
+# The Decision values of a recovery change log that make it the alignment backlog. Case, emphasis
+# and code marks around them do not matter; text after the colon is the detail.
+RE_DECISION = re.compile(r"^[*_`]*(later|in change|aligned|dropped)(?=[*_`\s:]|$)[*_`]*\s*:?\s*(.*)$", re.IGNORECASE)
+# Words that fill a Decision or Decided by cell while nothing is decided yet (a template placeholder too).
+RE_UNDECIDED = re.compile(r"^(?:$|\[|-$|—$|(?:open|pending|undecided|tbd|to decide)\b)", re.IGNORECASE)
+# The change log kind for behavior an old specification claims and the code never implemented.
+RE_CLAIM_KIND = re.compile(r"^claimed but not built$", re.IGNORECASE)
+
+
+def _cell(text):
+    """A table cell without the emphasis or code marks around it."""
+    return (text or "").strip().strip("*_`").strip()
+
+
+def decision_of(text):
+    """(state, detail) of a change log Decision cell: later, in_change, aligned or dropped with the
+    text after the colon; undecided while nothing is decided; settled for any other decision."""
+    cell = _cell(text)
+    match = RE_DECISION.match(cell)
+    if match:
+        word, detail = match.group(1).lower(), _cell(match.group(2))
+        if word == "in change":
+            link = RE_LINK.search(detail)
+            return "in_change", (link.group(1) if link else detail.strip("`"))
+        return word, detail
+    if RE_UNDECIDED.match(cell):
+        return "undecided", cell
+    return "settled", cell
+
+
+def _decision_paths(state, detail):
+    """The record of an entry in change, the audit reports of an aligned one, else []."""
+    if state == "in_change":
+        return [detail] if detail else []
+    if state != "aligned":
+        return []
+    return [link or part.strip().strip("`") for part in detail.split(";") if part.strip()
+            for link in [(RE_LINK.search(part) or [None, None])[1]]]
+
+
+def parse_change_log(path):
+    """Entries of a recovery change log in file order, [] when there is none. Each entry:
+    number, line, kind, use_cases, evidence, decision, decided_by (None without the column),
+    state and detail (from decision_of), paths (record or reports), ahead (AH ids, [] without the column).
+    OSError for a link that cannot be resolved in its place (link_error): it is not an absent change log."""
+    if path and unresolved_link(path):
+        raise link_error(path)
+    if not path or not os.path.isfile(path):
+        return []
+    entries = []
+    for table in read_tables(read_lines(path)):
+        if not table["header"] or table["header"][0].strip() != "#":
+            continue
+        for line, row, _ in table["rows"]:
+            number = row.get("#", "").strip()
+            if not number.isdigit():
+                continue
+            decision = row.get("Decision", "")
+            state, detail = decision_of(decision)
+            entries.append({"number": int(number), "line": line, "kind": _cell(row.get("Kind", "")),
+                            "use_cases": RE_UC_ID.findall(row.get("Use case", "")), "evidence": row.get("Evidence", ""),
+                            "decision": decision.strip(), "decided_by": row.get("Decided by"),
+                            "state": state, "detail": detail, "paths": _decision_paths(state, detail),
+                            "ahead": RE_AH_ID.findall(row.get("Ahead", ""))})
+    return entries
+
+
+# A ledger row's element: a use case with an optional flow or rule, or an entity with an optional aspect
+# (ENTITY CUSTOMER required, ENTITY ORDER lifecycle).
+RE_LEDGER_USE_CASE = re.compile(r"^(UC-\d{3})(?:\s+(A\d+|BR-\d{3}))?$")
+RE_LEDGER_ENTITY = re.compile(r"^ENTITY\s+([A-Za-z_][\w-]*)(?:\s+(\S.*?))?$")
+# One evidence location: path:line or path:first-last.
+RE_EVIDENCE = re.compile(r"(.+?):(\d+)(?:-(\d+))?")
+
+
+# The drive of a Windows path, as written with forward slashes: C: or a share, //server/share.
+RE_DRIVE = re.compile(r"^(?:[A-Za-z]:|//[^/]+/[^/]+)")
+
+
+def project_path(written, root):
+    """A path as a project's file writes it, given as the data gives paths: (path, place).
+
+    Backslashes are separators, as on Windows. A relative path is relative to root. place is 'project' when the
+    path is in the project, and path is then relative to root with forward slashes; 'outside' when it leaves the
+    project (a relative path that climbs out, or an absolute one elsewhere), and path is then the path normalized
+    with forward slashes, relative if it was written relative; 'other_drive' when it names a drive or a share the
+    root is not on, and path is then as written with forward slashes. A root on a drive (Windows) compares without
+    regard to case, as Windows does. An absolute path the root does not hold as written is still in the project when it
+    leads there on the file system: through a link, or another spelling of a folder on the way (/var for /private/var
+    on macOS), decided by the identity of the deepest part of it that exists (_resolved_inside)."""
+    path = written.strip().replace("\\", "/")
+    base = root.replace("\\", "/")
+    drive, base_drive = RE_DRIVE.match(path), RE_DRIVE.match(base)
+    # The path as the system names it, for _resolved_inside: one rooted on the root's own drive gets that drive.
+    whole = base_drive.group(0) + path if base_drive and not drive else path
+    fold = (lambda text: text.lower()) if base_drive else (lambda text: text)
+    if drive:
+        if not base_drive or fold(drive.group(0)) != fold(base_drive.group(0)):
+            return path, "other_drive"
+        path, base = path[drive.end():] or "/", base[base_drive.end():] or "/"
+    elif base_drive and path.startswith("/"):
+        base = base[base_drive.end():] or "/"          # a path rooted on the root's own drive
+    if not path.startswith("/"):
+        relative = posixpath.normpath(path)
+        return relative, ("outside" if relative == ".." or relative.startswith("../") else "project")
+    path, base = posixpath.normpath(path), posixpath.normpath(base)
+    if fold(path) == fold(base):
+        return ".", "project"
+    prefix = base.rstrip("/") + "/"
+    if fold(path).startswith(fold(prefix)):
+        return path[len(prefix):], "project"
+    inside = _resolved_inside(whole, root)
+    if inside is not None:
+        return inside, "project"
+    return (drive.group(0) if drive else "") + path, "outside"
+
+
+def _resolved_inside(path, root):
+    """Where path leads in the project whose root is root: the path from the root with forward slashes ('.' for the
+    root itself), or None when it leads elsewhere or that cannot be asked. Both must be absolute paths of this system.
+    The real path of path is walked up to the folder that is root itself on the file system (the same device and file
+    number), so that a link, an alias of a folder on the way or another capitalisation on a file system blind to case
+    leads in; a part that does not exist yet keeps its name. Where the system gives no file numbers (zero), identity
+    cannot be asked and the answer is None, so the lexical answer stands."""
+    if not (os.path.isabs(path) and os.path.isabs(root)):
+        return None
+    try:
+        mark = os.stat(root)
+        current = os.path.realpath(path)
+    except (OSError, ValueError):
+        return None
+    if not mark.st_ino:
+        return None             # no file numbers on this system: identity cannot be asked, the lexical answer stands
+    tail = []
+    while True:
+        try:
+            status = os.stat(current)
+            if status.st_ino and os.path.samestat(status, mark):
+                return "/".join(reversed(tail)) or "."
+        except (OSError, ValueError):
+            pass
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        tail.append(os.path.basename(current))
+        current = parent
+
+
+def evidence_locations(cell, root=None):
+    """The code locations of a ledger Evidence cell, separated by semicolons: [{text, path, place, line,
+    last_line}]. text is the location as written; path and place are project_path of its path against root (the
+    project's root), so path is relative to the project with forward slashes, and place says when it is not in the
+    project. A location without a line number keeps its path with line and last_line None; last_line is None
+    unless the location is a range."""
+    found = []
+    for item in (part.strip().strip("`") for part in (cell or "").split(";")):
+        if not item:
+            continue
+        match = RE_EVIDENCE.fullmatch(item)
+        path, place = project_path(match.group(1) if match else item, root or os.getcwd())
+        found.append({"text": item, "path": path, "place": place,
+                      "line": int(match.group(2)) if match else None,
+                      "last_line": int(match.group(3)) if match and match.group(3) else None})
+    return found
+
+
+def parse_ledger(path, root=None):
+    """Rows of a recovery ledger in file order, [] when there is none: every row of a table whose first column is
+    Element, except a template row (an empty element or one in [brackets]). Each row: line, element (without code
+    marks), use_case, part (the flow or rule of a use case, the aspect of an entity), entity, state (lower case, as
+    written), note, evidence (evidence_locations of its Evidence cell). root is the project's root its evidence
+    paths are relative to; by default the root of the specification folder the ledger sits in (DIR/recovery/).
+    OSError for a link that cannot be resolved in its place (link_error): it is not an absent ledger."""
+    if path and unresolved_link(path):
+        raise link_error(path)
+    if not path or not os.path.isfile(path):
+        return []
+    root = os.path.abspath(root or project_root(os.path.dirname(os.path.dirname(os.path.abspath(path)))))
+    rows = []
+    for table in read_tables(read_lines(path)):
+        if not table["header"] or table["header"][0].strip().lower() != "element":
+            continue
+        column = table["header"][0]
+        for line, row, _ in table["rows"]:
+            element = row.get(column, "").strip().strip("`")
+            if not element or element.startswith("["):
+                continue
+            use_case, entity = RE_LEDGER_USE_CASE.match(element), RE_LEDGER_ENTITY.match(element)
+            rows.append({"line": line, "element": element,
+                         "use_case": use_case.group(1) if use_case else None,
+                         "part": use_case.group(2) if use_case else (entity.group(2) if entity else None),
+                         "entity": entity.group(1) if entity else None,
+                         "state": row.get("State", "").strip().lower(), "note": row.get("Note", "").strip(),
+                         "evidence": evidence_locations(row.get("Evidence", ""), root)})
+    return rows
+
+
+# --- review reports (DIR/reviews/<scope>-review.md, or <scope>-review-<n>.md of an earlier release) ---
+
+RE_REVIEW_FILE = re.compile(r"^(?P<scope>.+?)-review(?:-(?P<number>\d+))?\.md$")
+# A verdict line: 'Ready for Reviewed: yes. Ready for Approved: no.' Only a Status counts, and only a plain yes or no:
+# the template's '[yes | no]' is no verdict.
+RE_VERDICT = re.compile(r"\bReady for\s+[*_`]*(?P<status>[A-Za-z]+)[*_`]*\s*:\s*[*_`]*\s*(?P<answer>yes|no)\b",
+                        re.IGNORECASE)
+RE_REVIEW_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+# The element a decline names: a use case or journey with an optional part, or a requirement.
+RE_DECLINED_ELEMENT = re.compile(r"\b(?:(?:UC|TC)-\d{3}(?:\s+(?:BR-\d{3}|A\d+|[Ss]tep\s+\d+|Pre-\d+|Post-[SF]-\d+))?"
+                                 r"|(?:FR|NFR|C)-\d{3})\b")
+
+
+def _review_section(lines, title):
+    """(heading line, [(line, text)]) of the first heading whose text starts with title, up to the next heading of
+    the same or a higher level; (None, []) when there is none. Fenced blocks are skipped."""
+    start, level, body = None, 0, []
+    for number, text in outside_fences(lines):
+        heading = RE_REVIEW_HEADING.match(text)
+        if heading and start is not None and len(heading.group(1)) <= level:
+            break
+        if heading and start is None and re.match(r"%s\b" % re.escape(title), heading.group(2), re.IGNORECASE):
+            start, level = number, len(heading.group(1))
+            continue
+        if start is not None:
+            body.append((number, text))
+    return start, body
+
+
+def read_review_report(path):
+    """What a review report says, read as data: {file, scope, scope_kind, number, title, title_line, verdicts,
+    verdict_line, declined, declined_line}.
+
+    scope comes from the file name (UC-004, TC-001, all), scope_kind is use_case, journey, all or other, number is n
+    of <scope>-review-<n>.md, else None. title is the first heading. verdicts: [{status, ready, line}], one per
+    'Ready for <Status>: yes|no', read in the Verdict section when there is one, else in the whole report.
+    declined: [{line, text, element}], the bullets of the Declined section other than 'None'; declined_line is that
+    section's heading line, None when the report has no such section. OSError or UnicodeDecodeError when it cannot
+    be read."""
+    lines = read_lines(path)
+    named = RE_REVIEW_FILE.match(os.path.basename(path))
+    scope = named.group("scope") if named else os.path.splitext(os.path.basename(path))[0]
+    kind = ("use_case" if RE_UC_ID.fullmatch(scope) else "journey" if RE_TC_ID.fullmatch(scope)
+            else "all" if scope.lower() == "all" else "other")
+    title = next(((number, RE_REVIEW_HEADING.match(text).group(2)) for number, text in outside_fences(lines)
+                  if RE_REVIEW_HEADING.match(text)), (None, None))
+    verdict_line, body = _review_section(lines, "Verdict")
+    verdicts = []
+    for number, text in (body if verdict_line is not None else list(outside_fences(lines))):
+        for match in RE_VERDICT.finditer(text):
+            status = match.group("status").capitalize()
+            if status in UC_STATUSES or status in TC_STATUSES:
+                verdicts.append({"status": status, "ready": match.group("answer").lower() == "yes", "line": number})
+    declined_line, body = _review_section(lines, "Declined")
+    declined = []
+    for number, text in body:
+        bullet = RE_BULLET.match(text)
+        if not bullet or re.fullmatch(r"(?i)none\W*", bullet.group(1).strip()):
+            continue
+        element = RE_DECLINED_ELEMENT.search(bullet.group(1))
+        declined.append({"line": number, "text": bullet.group(1), "element": element.group(0) if element else None})
+    return {"file": path, "scope": scope, "scope_kind": kind, "number": int(named.group("number")) if named and named.group("number") else None,
+            "title": title[1], "title_line": title[0], "verdicts": verdicts, "verdict_line": verdict_line,
+            "declined": declined, "declined_line": declined_line}
+
+
+# An audit names the recovery entries it can close on a Change log line; label emphasis is optional.
+RE_AUDIT_CHANGE_LOG = re.compile(r"^[*_]*Change log[*_]*:[*_]*(.*)$", re.IGNORECASE)
+# Entry citations are whole numbers after #, rather than use case identifiers or prose on other lines.
+RE_CHANGE_LOG_NUMBER = re.compile(r"#(\d+)")
+
+
+# The audit's clean verdicts may include explanations, as in n/a (no UI).
+CLEAN_VERDICTS = ("covered", "not applicable", "n/a")
+
+
+def closure_problems(root, entry):
+    """Shared closure check: (severity, code, message) findings for an aligned entry. OSError or UnicodeDecodeError
+    when a report cannot be read, a link that cannot be resolved in its place included (link_error)."""
+    if entry["state"] != "aligned":
+        return []
+    problems, named = [], set()
+    for target in entry["paths"]:
+        full = os.path.join(root, target)
+        if unresolved_link(full):
+            raise link_error(full)
+        if not os.path.isfile(full):
+            problems.append(("error", "AUDIT_REPORT_MISSING", "%s does not exist under %s" % (target, root)))
+            continue
+        lines = read_lines(full)
+        matrices = [table for table in read_tables(lines)
+                    if table["header"] and table["header"][0] == "Unit"
+                    and "Verdict" in table["header"] and table["rows"]]
+        if not matrices:
+            problems.append(("error", "AUDIT_REPORT_INVALID", "%s is not an audit report: no verdict matrix" % target))
+            continue
+        reported_entries = {int(number) for _, text in outside_fences(lines)
+                            for match in [RE_AUDIT_CHANGE_LOG.match(text)] if match
+                            for number in RE_CHANGE_LOG_NUMBER.findall(match.group(1))}
+        if entry["number"] not in reported_entries:
+            problems.append(("error", "AUDIT_REPORT_STALE",
+                             "%s does not list change log #%s: it was not written for this change"
+                             % (target, entry["number"])))
+        head = next((text for _, text in outside_fences(lines) if text.startswith("#")), "")
+        named.update(RE_UC_ID.findall(os.path.basename(target)) + RE_UC_ID.findall(head))
+        gaps = [row.get("Unit", "?").strip() for table in matrices for _, row, _ in table["rows"]
+                if not row.get("Verdict", "").strip().lower().startswith(CLEAN_VERDICTS)]
+        if gaps:
+            problems.append(("warning", "AUDIT_GAPS",
+                             "%s still shows gaps (%s); say why they do not concern this entry" % (target, ", ".join(gaps))))
+    missing = [uc for uc in entry["use_cases"] if uc not in named]
+    if not entry["paths"] or missing or not entry["use_cases"]:
+        problems.append(("error", "ALIGNED_INCOMPLETE",
+                         "aligned names an audit report for every use case of the entry; missing: %s"
+                         % (", ".join(missing) or "the use case or the report")))
+    return problems
+
+
 # --- locating the artifacts -------------------------------------------------
+
+# Both discovery and classification accept these root file spellings.
+DOC_FILES = {"vision": ("vision.md",), "requirements": ("requirements.md", "requirements_catalog.md"),
+             "entity_model": ("entity_model.md", "entity-model.md"), "overview": ("use_cases.md",)}
+# Classifying removed paths must use the same folder spellings as discovery.
+# The recovery records in the recovery folder, by the key Docs.unresolved gives each when it is a broken link.
+RECOVERY_FILES = {"recovery_ledger": "ledger.md", "recovery_change_log": "change-log.md"}
+DOC_FOLDERS = {"use_case_dir": ("use_cases", "use-cases", "usecases"),
+               "test_case_dir": ("test_cases", "test-cases"), "process_dir": ("processes",),
+               "recovery_dir": ("recovery",), "reviews_dir": ("reviews",)}
+
+
+def unresolved_link(path):
+    """Whether path is a link (or a junction) that cannot be resolved: its target is missing, or it leads back to
+    itself. Such a path is not an absent file: whoever reads it cannot, and should say so."""
+    return os.path.lexists(path) and not os.path.exists(path)
+
+
+def absent(path):
+    """Whether there is nothing at path: the system answers that no such file exists. A link that cannot be resolved is
+    there, and so is a file in a folder that cannot be searched, or one behind a link that cannot be resolved on the
+    way to it, at any depth (unreachable): whoever reads any of them cannot, and should say so instead of calling it
+    missing."""
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return _first_stop(os.path.abspath(path)) is None
+    except ValueError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def no_such(kind, path):
+    """The usage error for a file or folder a command was given and cannot use: 'no such folder: PATH', or for a link
+    that cannot be resolved 'cannot read PATH: ...', naming it as a link (link_error), never as missing; the same for a
+    path behind such a link or behind a folder that cannot be searched (unreachable), naming what stops the reader."""
+    if unresolved_link(path):
+        return "cannot read %s: %s" % (path, link_error(path))
+    blocked = unreachable(path)
+    if blocked:
+        return "cannot read %s: %s" % (path, blocked[1])
+    return "no such %s: %s" % (kind, path)
+
+
+def link_error(path):
+    """The error to report for a link that cannot be resolved: an OSError that names it as such, with the target it
+    gives and the reason the system gives, so that a reader is not told only that a file it can see is missing."""
+    try:
+        os.stat(path)
+    except OSError as exc:
+        reason, number = exc.strerror or str(exc), exc.errno
+    else:
+        reason, number = "no longer resolves", None
+    try:
+        target = " to %s" % os.readlink(path)
+    except (OSError, ValueError, AttributeError):
+        target = ""
+    return OSError(number, "a link that cannot be resolved%s (%s)" % (target, reason), path)
+
+
+def why_unreadable(path):
+    """Why a reader cannot reach path although it may be there, as the error to report: link_error for a link that
+    cannot be resolved in its place, the error of unreachable for a path behind such a link or a folder that cannot be
+    searched, at any depth. None when path can be reached, or is plainly absent."""
+    if unresolved_link(path):
+        return link_error(path)
+    blocked = unreachable(path)
+    return blocked[1] if blocked else None
+
+
+def explained(exc, path):
+    """exc, or why_unreadable(path) when exc is an error of the system and something on the way to path, or a link in
+    its place, stops the reader: the error then names that, not a file that seems missing."""
+    if isinstance(exc, OSError) and path:
+        return why_unreadable(path) or exc
+    return exc
+
+
+def way_error(folder, exc):
+    """The error to report for a folder on the way to a file or folder that cannot be searched: an OSError that names
+    the folder, with the reason the system gives, so that what lies behind it is not called missing."""
+    return OSError(getattr(exc, "errno", None), "a folder on the way that cannot be searched (%s)"
+                   % (getattr(exc, "strerror", None) or exc), folder)
+
+
+def _first_stop(full):
+    """The first folder on the way from the top of the file system down to full (an absolute path), full included,
+    that stops a reader: (folder, error), the folder absolute and the error naming it (link_error for a link that
+    cannot be resolved, way_error for a folder that cannot be searched); None when nothing on the way stops a reader,
+    so that full is there or plainly absent."""
+    full = os.path.normpath(full)
+    drive, rest = os.path.splitdrive(full)
+    current = drive + os.sep                    # the top: / on POSIX, C:\ or \\server\share\ on Windows
+    parts = [part for part in rest.split(os.sep) if part]
+    for part in parts + [None]:
+        if unresolved_link(current):
+            return current, link_error(current)
+        if part is None:
+            return None
+        child = os.path.join(current, part)
+        try:
+            os.lstat(child)
+        except (FileNotFoundError, NotADirectoryError, ValueError):
+            return None
+        except OSError as exc:
+            return current, way_error(current, exc)
+        current = child
+    return None
+
+
+def unreachable(path):
+    """What keeps a reader from path although it may be there: (folder, error) for the first folder on the way down
+    from the top of the file system to path, path included, that is a link that cannot be resolved (link_error) or a
+    folder that cannot be searched (way_error). Every part of the path is looked at before a missing part is read as
+    absence. None when nothing on the way stops a reader: path is then there, or plainly absent. folder, and the path
+    the error names, are spelled as path is: relative when path is relative."""
+    found = _first_stop(os.path.abspath(path))
+    if found is None:
+        return None
+    folder = found[0]
+    if not os.path.isabs(path):
+        try:
+            folder = os.path.relpath(folder)
+        except ValueError:      # another drive than the current folder's
+            pass
+    exc = found[1]
+    return folder, OSError(exc.errno, exc.strerror, folder)
+
+
+def unsearchable(folder):
+    """The error to report for a folder whose names may be listed and that cannot be searched (read without execute):
+    nothing in it can be reached, a file or a folder it lists included, so that whoever reads it cannot and should say
+    so instead of calling what it holds missing. None when folder can be searched, or is no folder."""
+    try:
+        os.lstat(os.path.join(folder, os.curdir))
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return None
+    except OSError as exc:
+        return OSError(exc.errno, "a folder that cannot be searched (%s)" % (exc.strerror or exc), folder)
+    return None
+
+
+def folder_present(path):
+    """Whether a command can take path as the specification folder it was given: a folder, a link in its place that
+    cannot be resolved, or a path behind such a link or behind a folder that cannot be searched (unreachable). All but
+    the first are present and unreadable, never missing: the old-format check (stop_if_old) then reports them as the
+    finding UNREADABLE instead of the command answering that there is no such folder."""
+    return os.path.isdir(path) or unresolved_link(path) or unreachable(path) is not None
+
+
+# What os.lstat reports on Windows for a junction: the reparse point attribute, and the reparse tag of a mount point.
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+
+
+def junction_status(status):
+    """Whether a status from os.lstat is a Windows junction's: the reparse point attribute set and the reparse tag of a
+    mount point. False for a status without them, as on every other system."""
+    attributes = getattr(status, "st_file_attributes", 0) or 0
+    return bool(attributes & FILE_ATTRIBUTE_REPARSE_POINT) and \
+        getattr(status, "st_reparse_tag", None) == IO_REPARSE_TAG_MOUNT_POINT
+
+
+def _is_link(path):
+    """A symbolic link, or a Windows junction: os.path.isjunction tells one from Python 3.12, and before it what
+    os.lstat reports (junction_status)."""
+    if os.path.islink(path):
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    if callable(isjunction):
+        return bool(isjunction(path))
+    try:
+        return junction_status(os.lstat(path))
+    except (OSError, ValueError):
+        return False
+
+
+def _within(path, folder):
+    """Whether path is folder or under it, both resolved paths.
+
+    Decided by the identity of the folders on the file system: path or one of the folders above it is folder itself.
+    So a second spelling of a folder, as another capitalisation on a file system blind to case, is the same folder.
+    The paths are compared as strings only where the identity cannot be asked: folder cannot be reached, the system
+    gives no file numbers, or no folder above path matched and one of them could not be reached."""
+    try:
+        mark = os.stat(folder)
+    except (OSError, ValueError):
+        mark = None
+    if mark is not None and mark.st_ino:
+        current, unknown = path, False
+        while True:
+            try:
+                if os.path.samestat(os.stat(current), mark):
+                    return True
+            except (OSError, ValueError):
+                unknown = True
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        if not unknown:
+            return False
+    try:
+        return os.path.commonpath([os.path.normcase(path), os.path.normcase(folder)]) == os.path.normcase(folder)
+    except ValueError:          # another drive
+        return False
+
+
+def outside_link(path, root):
+    """The link through which path is read from outside the project whose root is root: (link, target), the link
+    as a path under root and the real path of path itself. None when no link on the way from the
+    root to path leads out of the project: a link that stays inside it gets no mark. A link inside the project that
+    leads to a link out of it is not the one that leaves; the second is. None also for a path not under root."""
+    base = os.path.abspath(root)
+    full = os.path.abspath(path)
+    try:
+        relative = os.path.relpath(full, base)
+    except ValueError:          # another drive
+        return None
+    if relative == os.curdir or relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return None
+    real_root = os.path.realpath(base)
+    current = base
+    for part in relative.split(os.sep):
+        current = os.path.join(current, part)
+        if _is_link(current) and not _within(os.path.realpath(current), real_root):
+            return current, os.path.realpath(full)
+    return None
+
+
+def _identity(path):
+    """What makes two paths one file or folder: its device and file number, else its resolved path; None when it
+    cannot be reached."""
+    try:
+        status = os.stat(path)
+    except OSError:
+        return None
+    if status.st_ino:
+        return status.st_dev, status.st_ino
+    return os.path.normcase(os.path.realpath(path))
+
+
+def walk_folders(top, unreadable=None):
+    """Every folder under top, top included, each real folder once, whatever the links between them.
+
+    A folder reached without a link comes before one reached only through a link, so an alias never stands in for
+    the folder it names; a link that leads into a folder already visited, a loop back to top included, ends there.
+    A link to a folder outside top is followed. Hidden folders (a name starting with a dot) are left out, as a
+    recursive glob leaves them out. A folder that cannot be listed is yielded; its contents are not, and when
+    unreadable is a list the folder is added to it as (path, error): what the walk could not look into. So is, never
+    skipped in silence, a folder it lists and cannot reach (in a folder that can be listed and not searched), and an
+    entry it cannot tell a folder from something else, such as a link whose target it is denied. A path that is
+    plainly gone is left out, and so is a link that cannot be resolved (its target missing, or a loop back to
+    itself), as a recursive glob leaves it out: it is no folder to search, and one in place of an artifact or a
+    change-records folder is reported where it stands (Docs.unresolved, record_search)."""
+    seen, found, links = set(), [], [top]
+
+    def denied(path, exc):
+        if unreadable is not None and not isinstance(exc, (FileNotFoundError, NotADirectoryError)) \
+                and getattr(exc, "errno", None) != errno.ELOOP:
+            unreadable.append((path, exc))
+
+    while links:
+        stack = [links.pop(0)]
+        while stack:
+            folder = stack.pop()
+            try:
+                status = os.stat(folder)
+            except OSError as exc:
+                denied(folder, exc)
+                continue
+            key = (status.st_dev, status.st_ino) if status.st_ino else os.path.normcase(os.path.realpath(folder))
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(folder)
+            try:
+                with os.scandir(folder) as entries:
+                    entries = sorted(entries, key=lambda entry: entry.name)
+            except OSError as exc:
+                denied(folder, exc)
+                continue
+            children = []
+            for entry in entries:
+                if entry.name.startswith("."):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        children.append(entry.path)
+                    elif entry.is_symlink() and entry.is_dir():
+                        links.append(entry.path)
+                except OSError as exc:
+                    denied(entry.path, exc)
+            stack.extend(reversed(children))
+    return found
+
+
+def _owned_by_the_method(root):
+    """A test of whether a folder under the specification folder root is one the method owns: root itself, one of its
+    canonical folders (DOC_FOLDERS, any of their spellings), or a change-records folder at any depth, a link in its
+    place included. A folder is told by its identity on the file system where it can be asked, so another spelling of
+    one on a file system blind to case is the same folder, and by its path where it cannot."""
+    base = os.path.normcase(os.path.normpath(root))
+    spellings = {spelling for names in DOC_FOLDERS.values() for spelling in names}
+    known = {_identity(root)} | {_identity(os.path.join(root, spelling)) for spelling in spellings}
+    known.discard(None)
+
+    def owned(path):
+        path = os.path.normpath(path)
+        parent, name = os.path.dirname(path), os.path.basename(path)
+        if name == "change-records" or os.path.normcase(path) == base:
+            return True
+        if os.path.normcase(parent) == base and name in spellings:
+            return True
+        key = _identity(path)
+        return key is not None and (key in known or key == _identity(os.path.join(parent, "change-records")))
+    return owned
+
+
+def record_search(root):
+    """The search for change records under a specification folder: (folders, unreadable, not_searched).
+
+    folders is every change-records folder, in path order, each real folder once. The name is looked up in each
+    folder walk_folders gives, the specification folder included, as upspec 1.8.0's recursive search for
+    **/change-records did: a file system blind to case also finds a folder spelled Change-Records, under the spelling
+    change-records. A folder link inside the specification folder neither repeats one nor loops, and the path that is
+    not a link wins over an alias of it. The name is looked up in a folder that cannot be listed too: one that can
+    still be searched (execute without read) gives its change-records folder.
+
+    What the search could not look into is [(path, error)], in two lists. unreadable is what the method owns, so that
+    no change record is taken for absent that may be there: a change-records link that cannot be resolved
+    (link_error), a folder that cannot be listed that is the specification folder, one of its canonical folders or
+    a change-records folder, and a change-records folder found that cannot be searched, an empty one included
+    (unsearchable). not_searched is every other folder that cannot be listed, such as a tool's cache or
+    node_modules: the method writes no change record there, so it stops nothing, and it is named all the same, since a
+    change record under it, if any, is not read."""
+    candidates, problems = [], []
+    for order, folder in enumerate(walk_folders(root, problems)):
+        path = os.path.join(folder, "change-records")
+        if os.path.isdir(path):
+            candidates.append((_is_link(path), order, path))
+        elif unresolved_link(path):
+            problems.append((path, link_error(path)))
+    found, seen = [], set()
+    for _, _, path in sorted(candidates):
+        key = _identity(path)
+        if key is not None and key not in seen:
+            seen.add(key)
+            found.append(path)
+    # A change-records folder that can be listed and not searched holds no record that can be read, an empty one
+    # included, whose listing alone would show nothing amiss.
+    problems += [(path, unsearchable(path)) for path in found if unsearchable(path)]
+    owned = _owned_by_the_method(root)
+    unreadable = [(path, exc) for path, exc in problems if owned(path)]
+    not_searched = [(path, exc) for path, exc in problems if not owned(path)]
+    return sorted(found), sorted(unreadable, key=lambda item: item[0]), sorted(not_searched, key=lambda item: item[0])
+
+
+def change_record_folders(root):
+    """Every change-records folder under a specification folder, in path order, each real folder once (record_search,
+    which also says what the search could not look into)."""
+    return record_search(root)[0]
+
+
+def not_searched_notes(not_searched, stream=None):
+    """Write a note for each folder the search for change records could not look into and that stops nothing
+    (record_search's not_searched), so that no one takes the search for complete: 'note: PATH was not searched for
+    change records: ERROR'. On standard error unless stream is given."""
+    stream = sys.stderr if stream is None else stream
+    for path, exc in not_searched:
+        stream.write("note: %s was not searched for change records: %s\n" % (path, exc))
+
 
 class Docs:
     """Paths of the specification artifacts under a docs folder, with tolerated older spellings."""
@@ -466,15 +1728,24 @@ class Docs:
     def __init__(self, docs_dir):
         self.root = docs_dir
         self.notes = []          # (path, message) for tolerated spellings
-        self.vision = self._first("vision.md")
-        self.requirements = self._first("requirements.md", "requirements_catalog.md")
-        self.entity_model = self._first("entity_model.md", "entity-model.md")
-        self.diagram = self._first("use_cases.puml", "use-cases.puml")
-        self.use_case_dir = self._first("use_cases", "use-cases", "usecases", want_dir=True)
-        self.test_case_dir = self._first("test_cases", "test-cases", want_dir=True)
-        self.process_dir = self._first("processes", want_dir=True)
-        self.recovery_dir = self._first("recovery", want_dir=True)
-        self.reviews_dir = self._first("reviews", want_dir=True)
+        for attribute, names in DOC_FILES.items():
+            setattr(self, attribute, self._first(*names))
+        for attribute, names in DOC_FOLDERS.items():
+            setattr(self, attribute, self._first(*names, want_dir=True))
+        # {attribute: path} for an artifact the project has only as a link that cannot be resolved. The attribute
+        # stays None, so a check reads it as absent as before; the old-format check (old_formats) and the model
+        # command list it as unreadable. The recovery records count too, under the keys of RECOVERY_FILES.
+        self.unresolved = {}
+        for attribute, names in list(DOC_FILES.items()) + list(DOC_FOLDERS.items()):
+            if getattr(self, attribute) is None:
+                broken = [os.path.join(docs_dir, name) for name in names
+                          if unresolved_link(os.path.join(docs_dir, name))]
+                if broken:
+                    self.unresolved[attribute] = broken[0]
+        for key, name in RECOVERY_FILES.items():
+            path = os.path.join(self.recovery_dir, name) if self.recovery_dir else None
+            if path and unresolved_link(path):
+                self.unresolved[key] = path
 
     def _first(self, *names, **options):
         want_dir = options.get("want_dir", False)
@@ -489,11 +1760,57 @@ class Docs:
     def use_case_files(self):
         return _matching(self.use_case_dir, r"^UC-\d{3}.*\.md$")
 
+    def kind(self, path: str) -> Optional[str]:
+        """Classify existing or missing paths by spelling, resolving aliases on both sides."""
+        full, root = os.path.realpath(path), os.path.realpath(self.root)
+        try:
+            if os.path.commonpath([full, root]) != root:
+                return None
+        except ValueError:  # Paths on different drives cannot share a docs folder.
+            return None
+        parent, name = os.path.dirname(full), os.path.basename(full)
+        if os.path.basename(parent) == "change-records" and name.endswith(".md"):
+            return "change_record"
+        for kind, attribute, pattern in (("use_case", "use_case_dir", r"UC-\d{3}.*\.md"),
+                                          ("test_case", "test_case_dir", r"TC-\d{3}.*\.md"),
+                                          ("process", "process_dir", r".*\.bpmn")):
+            if re.fullmatch(pattern, name) and any(
+                    parent == os.path.realpath(os.path.join(root, spelling)) for spelling in DOC_FOLDERS[attribute]):
+                return kind
+        for kind, attribute in (("review", "reviews_dir"), ("recovery", "recovery_dir")):
+            for spelling in DOC_FOLDERS[attribute]:
+                directory = os.path.realpath(os.path.join(root, spelling))
+                if os.path.commonpath([full, directory]) == directory:
+                    return kind
+        for kind, spellings in DOC_FILES.items():
+            if any(full == os.path.realpath(os.path.join(root, spelling)) for spelling in spellings):
+                return kind
+        return "other"
+
     def test_case_files(self):
         return _matching(self.test_case_dir, r"^TC-\d{3}.*\.md$")
 
+    def record_search_unreadable(self, not_searched=None):
+        """[(path, error)] for what the search for change records could not look into and the method owns
+        (record_search's unreadable). When not_searched is a list, every other folder the search could not look into
+        is added to it as (path, error)."""
+        _, unreadable, others = record_search(self.root)
+        if not_searched is not None:
+            not_searched.extend(others)
+        return unreadable
+
+    def change_record_files(self):
+        """Every change record under the specification folder: the .md files of each change-records folder, each
+        folder once (change_record_folders)."""
+        return sorted(path for folder in change_record_folders(self.root)
+                      for path in glob.glob(os.path.join(glob.escape(folder), "*.md")))
+
     def process_files(self):
         return _matching(self.process_dir, r".*\.bpmn$")
+
+    def review_files(self):
+        """The review reports of the reviews folder: <scope>-review.md and <scope>-review-<n>.md."""
+        return _matching(self.reviews_dir, RE_REVIEW_FILE.pattern)
 
 
 def _matching(directory, pattern):
@@ -512,7 +1829,10 @@ class Requirement:
         self.line = line
         self.column_count = column_count
         self.title = row.get("Title", "")
-        self.text = row.get("User Story") or row.get("Requirement") or row.get("Constraint") or row.get("Description", "")
+        self.role = row.get("Role", "")
+        self.need = row.get("Need", "")
+        self.statement = row.get("Statement", "")
+        self.text = self.need or self.statement
         self.status = row.get("Status", "")
         self.priority = row.get("Priority", "")
 
@@ -541,6 +1861,8 @@ class Entity:
         self.avoid = []            # words that must not be used for this concept
         self.attributes = []       # (line, row dict)
         self.header = []
+        self.header_line = line
+        self.separator = None
         self.lifecycle = None      # (line, text)
         self.constraints = []      # (line, text)
 
@@ -616,7 +1938,10 @@ def parse_entity_model(path):
                 if table is None:
                     table = cells
                     entity.header = cells
-                elif not all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+                    entity.header_line = number
+                elif number == entity.header_line + 1 and table_separator(cells):
+                    entity.separator = (number, cells)
+                else:
                     entity.attributes.append((number, dict(zip(table, cells + [""] * (len(table) - len(cells)))), len(cells)))
                 continue
             field = RE_FIELD.match(stripped)
@@ -629,57 +1954,6 @@ def parse_entity_model(path):
             elif stripped and not entity.description and table is None and not stripped.startswith("**"):
                 entity.description = stripped
     return model
-
-
-# --- use case diagram -------------------------------------------------------
-
-class Diagram:
-    def __init__(self):
-        self.system = None
-        self.actors = {}       # alias -> (name, line)
-        self.use_cases = {}    # id -> (name, alias, line)
-        self.aliases = {}      # alias -> id
-        self.links = []        # (line, left alias, right alias, arrow)
-        self.bad_labels = []   # (line, text) use case declarations without the id-and-name label
-        self.duplicates = []   # (line, id) of a second declaration of the same use case id
-        self.has_start = self.has_end = False
-
-
-def parse_diagram(path):
-    lines = read_lines(path)
-    diagram = Diagram()
-    for number, line in enumerate(lines, 1):
-        stripped = line.strip()
-        if stripped.startswith("@startuml"):
-            diagram.has_start = True
-        elif stripped.startswith("@enduml"):
-            diagram.has_end = True
-        actor = re.match(r'^actor\s+"?([^"]+?)"?\s+as\s+(\w+)\s*$', stripped) or re.match(r'^actor\s+(\w+)\s*$', stripped)
-        if actor:
-            alias = actor.group(2) if actor.lastindex == 2 else actor.group(1)
-            diagram.actors[alias] = (actor.group(1), number)
-            continue
-        box = re.match(r'^(?:rectangle|package)\s+"?([^"{]+?)"?\s*\{', stripped)
-        if box:
-            diagram.system = box.group(1).strip()
-            continue
-        use_case = re.match(r'^usecase\s+"([^"]*)"\s+as\s+(\w+)', stripped)
-        if use_case:
-            label = use_case.group(1)
-            match = re.match(r"^(UC-\d+)\\n(.+)$", label)
-            if match:
-                if match.group(1) in diagram.use_cases:
-                    diagram.duplicates.append((number, match.group(1)))
-                    continue
-                diagram.use_cases[match.group(1)] = (match.group(2).strip(), use_case.group(2), number)
-                diagram.aliases[use_case.group(2)] = match.group(1)
-            else:
-                diagram.bad_labels.append((number, label))
-            continue
-        link = re.match(r"^(\w+)\s+([.<|o*-]+>?|<?[.|-]+)\s+(\w+)(?:\s*:.*)?$", stripped)
-        if link and ("-" in link.group(2) or "." in link.group(2)):
-            diagram.links.append((number, link.group(1), link.group(3), link.group(2)))
-    return diagram
 
 
 # --- use case specification -------------------------------------------------
@@ -705,27 +1979,65 @@ class Flow:
     def retired(self):
         return is_retired(self.name)
 
+    @property
+    def moved_to(self):
+        return moved_to(self.name)
+
 
 class Rule:
     def __init__(self, rid, name, line):
         self.id, self.name, self.line = rid, name, line
         self.body = []               # (line, text)
+        self.examples = None
+        self.examples_blank_before = False
 
     def text(self):
-        return " ".join(text.strip() for _, text in self.body if text.strip())
+        return " ".join(text.strip() for _, text in self.body if text.strip() and table_cells(text) is None)
 
     @property
     def retired(self):
         return is_retired(self.name)
 
+    @property
+    def moved_to(self):
+        return moved_to(self.name)
 
-class UseCase:
+
+class _WithFrontMatter:
+    """A parsed file whose metadata is one FrontMatter (self.front_matter): meta and its problems are read
+    from it."""
+
+    @property
+    def meta(self):
+        return self.front_matter.meta
+
+    @property
+    def front_matter_problems(self):
+        return self.front_matter.problems
+
+
+USE_CASE_SECTIONS = {title.casefold(): title for title in (
+    "Goal", "Trigger", "Preconditions", "Main Success Scenario", "Alternative Flows",
+    "Postconditions", "Business Rules",
+)}
+
+
+def canonical_section(title: str) -> str:
+    """Match known use case sections while leaving custom titles unchanged."""
+    normalized = " ".join(title.split()).removesuffix(":").strip().casefold()
+    return USE_CASE_SECTIONS.get(normalized, title)
+
+
+class UseCase(_WithFrontMatter):
     def __init__(self, path):
         self.path = path
         self.title = None
         self.title_line = 0
-        self.fields = {}             # label -> (value, line)
-        self.section_lines = {}      # section title -> heading line
+        self.front_matter = FrontMatter()
+        self.is_stub = False
+        self.section_lines = {}      # canonical section name -> first heading line
+        self.section_titles = {}     # canonical section name -> first title as written
+        self.duplicate_sections = []  # (canonical name, title as written, heading line)
         self.preconditions = []      # (line, text)
         self.steps = []
         self.flows = []
@@ -738,7 +2050,15 @@ class UseCase:
         self.line_count = 0
 
     def field(self, label):
-        return self.fields.get(label, ("", 0))[0]
+        return _as_text(self.meta.get(FIELD_KEYS.get(label, label), ("", 0))[0])
+
+    def field_line(self, label):
+        return self.meta.get(FIELD_KEYS.get(label, label), ("", 0))[1]
+
+    @property
+    def fields(self):
+        return {label: (self.field(label), self.field_line(label))
+                for label in FIELD_KEYS if FIELD_KEYS[label] in self.meta}
 
     @property
     def id(self):
@@ -751,18 +2071,33 @@ class UseCase:
 
     @property
     def status(self):
-        return self.field("Status").split("|")[0].strip()
+        return self.field("Status").strip()
 
     @property
     def requirement_ids(self):
         return RE_REQ_ID.findall(split_external(self.field("Requirements"))[0])
 
     @property
+    def goal(self):
+        return self.field("Goal")
+
+    @property
+    def trigger(self):
+        return self.field("Trigger")
+
+    @property
+    def primary_actors(self):
+        value = self.meta.get("primary_actor", ("", 0))[0]
+        return [actor.strip() for actor in value.split(",") if actor.strip()] if isinstance(value, str) else []
+
+    @property
+    def secondary_actors(self):
+        value = self.meta.get("secondary_actors", ([], 0))[0]
+        return value if isinstance(value, list) else []
+
+    @property
     def actors(self):
-        names = []
-        for label in ("Primary Actor", "Secondary Actors"):
-            names += [a.strip() for a in self.field(label).split(",") if a.strip()]
-        return names
+        return self.primary_actors + self.secondary_actors
 
     def all_step_texts(self):
         """Every step of the main scenario and of the flows: (line, text, where)."""
@@ -779,30 +2114,37 @@ def parse_use_case(path):
 def parse_use_case_lines(lines, path):
     """Parse a use case from lines already in memory, for example an older revision from git."""
     uc = UseCase(path)
+    uc.front_matter = front_matter(lines)
+    start = uc.front_matter.body_start
     uc.line_count = len(lines[:-1] if lines and lines[-1] == "" else lines)
     section = sub = None
     flow = rule = None
-    for number, line in enumerate(lines, 1):
+    for number, line in enumerate(lines[start:], start + 1):
         stripped = line.strip()
         if line.startswith("# "):
             if uc.title is None:
-                uc.title = re.sub(r"^Use Case:\s*", "", line[2:].strip())
+                uc.title = line[2:].strip()
                 uc.title_line = number
             continue
         if line.startswith("## "):
-            section, sub, flow, rule = line[3:].strip(), None, None, None
-            uc.section_lines[section] = number
+            title = line[3:].strip()
+            section, sub, flow, rule = canonical_section(title), None, None, None
+            if section in uc.section_lines:
+                uc.duplicate_sections.append((section, title, number))
+            else:
+                uc.section_lines[section] = number
+                uc.section_titles[section] = title
             continue
         if line.startswith("### "):
             sub = line[4:].strip()
             flow = rule = None
             if section == "Alternative Flows":
-                match = re.match(r"^(A\d+)\s*:\s*(.*)$", sub)
-                flow = Flow(match.group(1) if match else sub, match.group(2) if match else "", number)
+                match = re.match(r"^(A\d+)\s*:\s*(.*)$", sub, re.IGNORECASE)
+                flow = Flow(match.group(1).upper() if match else sub, match.group(2) if match else "", number)
                 uc.flows.append(flow)
             elif section == "Business Rules":
-                match = re.match(r"^(BR-\d+)\s*:\s*(.*)$", sub)
-                rule = Rule(match.group(1) if match else sub, match.group(2) if match else "", number)
+                match = re.match(r"^(BR-\d+)\s*:\s*(.*)$", sub, re.IGNORECASE)
+                rule = Rule(match.group(1).upper() if match else sub, match.group(2) if match else "", number)
                 uc.rules.append(rule)
             continue
         if not stripped:
@@ -810,9 +2152,7 @@ def parse_use_case_lines(lines, path):
         field = RE_FIELD.match(stripped)
         numbered = RE_NUMBERED.match(line)
         bullet = RE_BULLET.match(line)
-        if section == "Overview" and field:
-            uc.fields[field.group(1)] = (field.group(2), number)
-        elif section == "Preconditions" and bullet:
+        if section == "Preconditions" and bullet:
             uc.preconditions.append((number, bullet.group(1)))
         elif section == "Main Success Scenario" and numbered:
             uc.steps.append(Step(int(numbered.group(1)), numbered.group(2), number))
@@ -841,6 +2181,15 @@ def parse_use_case_lines(lines, path):
             target.append((number, bullet.group(1)))
         elif section == "Business Rules" and rule is not None:
             rule.body.append((number, line))
+            cells = table_cells(line)
+            if cells is not None:
+                if rule.examples is None:
+                    rule.examples = {"line": number, "header": cells, "separator": None, "rows": []}
+                    rule.examples_blank_before = number > 1 and not lines[number - 2].strip()
+                elif number == rule.examples["line"] + 1 and table_separator(cells):
+                    rule.examples["separator"] = (number, cells)
+                else:
+                    rule.examples["rows"].append((number, cells))
     cited = uc.all_step_texts() + [(flow.trigger_line, flow.trigger, flow.label) for flow in uc.flows]
     for line_no, text, where in cited:
         local, external = split_external(text)
@@ -849,6 +2198,7 @@ def parse_use_case_lines(lines, path):
             uc.citations.append((line_no, cite.group(1), cite.group(2), where))
     value, line_no = uc.fields.get("Requirements", ("", 0))
     uc.external += [(line_no, context, identifier, rule_id, "Requirements") for context, identifier, rule_id in split_external(value)[1]]
+    uc.is_stub = any(l.strip() == STUB_TEXT for l in lines[start:]) and "Main Success Scenario" not in uc.section_lines
     return uc
 
 
@@ -856,23 +2206,88 @@ def load_use_cases(docs):
     return [parse_use_case(path) for path in docs.use_case_files()]
 
 
+def every_use_case(docs, obsolete=True, unreadable=None):
+    """Each identified use case once, in identifier order, for a command's --all mode: [(id, path, parsed)].
+
+    A use case whose id cannot be read is left out, and so is an Obsolete one unless obsolete is True. The file
+    is the one find_use_case gives for the id, the one a call naming the id reads; when no file name carries
+    the id, the first file whose front matter holds it. Raises OSError or UnicodeDecodeError on a file that
+    cannot be read, unless unreadable is a list: the file is then added to it once as (path, error) and left out,
+    and so is the id whose file, the one a call naming it reads, cannot be read."""
+    def parse(path):
+        if unreadable is None:
+            return parse_use_case(path)
+        try:
+            return parse_use_case(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            if all(os.path.abspath(path) != os.path.abspath(known) for known, _ in unreadable):
+                unreadable.append((path, exc))
+            return None
+
+    found = {}
+    for uc in filter(None, (parse(path) for path in docs.use_case_files())):
+        if uc.id and uc.id not in found and (obsolete or uc.status != "Obsolete"):
+            found[uc.id] = uc
+    result = []
+    for uc_id in sorted(found):
+        path = find_use_case(docs, uc_id)
+        if path and os.path.abspath(path) != os.path.abspath(found[uc_id].path):
+            uc = parse(path)
+            if uc is None or not uc.id or not (obsolete or uc.status != "Obsolete"):
+                continue
+        else:
+            path, uc = found[uc_id].path, found[uc_id]
+        result.append((uc_id, path, uc))
+    return result
+
+
+def unidentified_use_cases(use_cases):
+    """{identifier in the file name: path} for each use case whose id was refused as a value on several lines.
+
+    Its id cannot be read, so the use case is not identified: a citation of the identifier its file name
+    carries cannot be judged, and the overview cannot be generated without dropping it. The file name never
+    stands in for the id; it only says which citations to leave unjudged."""
+    found = {}
+    for uc in use_cases:
+        if "id" in uc.front_matter.refused:
+            match = RE_UC_ID.search(os.path.basename(uc.path))
+            found[match.group(0) if match else os.path.basename(uc.path)] = uc.path
+    return found
+
+
 # --- journey test case ------------------------------------------------------
 
-class TestCase:
+class Scenario:
+    def __init__(self, name, line):
+        self.name, self.line = name, line
+        self.steps = []  # (line, keyword, text, annotated use case ids)
+        self.named_flows = []  # (step line, use case id, flow label): a flow the comment above a step names
+        self.problems = []
+
+
+class TestCase(_WithFrontMatter):
     def __init__(self, path):
         self.path = path
         self.title = None
-        self.fields = {}
+        self.front_matter = FrontMatter()
         self.section_lines = {}
         self.roles = []
         self.preconditions = []
-        self.flow_header = []
-        self.flow_rows = []          # (line, row dict)
-        self.validations = []        # (line, text)
         self.postconditions = []
+        self.scenarios = []
+        self.gherkin_blocks = 0
+        self.gherkin_problems = []
 
     def field(self, label):
-        return self.fields.get(label, ("", 0))[0]
+        return _as_text(self.meta.get(FIELD_KEYS.get(label, label), ("", 0))[0])
+
+    def field_line(self, label):
+        return self.meta.get(FIELD_KEYS.get(label, label), ("", 0))[1]
+
+    @property
+    def fields(self):
+        return {label: (self.field(label), self.field_line(label))
+                for label in FIELD_KEYS if FIELD_KEYS[label] in self.meta}
 
     @property
     def id(self):
@@ -880,46 +2295,67 @@ class TestCase:
         return match.group(0) if match else None
 
     def use_case_ids(self):
-        ids = []
-        for _, row in self.flow_rows:
-            match = RE_UC_ID.search(row.get("Use Case", ""))   # link text and link target both carry the id
-            if match:
-                ids.append(match.group(0))
-        return ids
+        value = self.meta.get("use_cases", ([], 0))[0]
+        return value if isinstance(value, list) else []
 
 
 def parse_test_case(path):
     lines = read_lines(path)
     tc = TestCase(path)
-    section = None
-    for number, line in enumerate(lines, 1):
+    tc.front_matter = front_matter(lines)
+    start = tc.front_matter.body_start
+    section = fence = scenario = None
+    gherkin = False
+    annotations, flows = [], []
+    for number, line in enumerate(lines[start:], start + 1):
         stripped = line.strip()
-        if line.startswith("# ") and tc.title is None:
-            tc.title = re.sub(r"^Test Case:\s*", "", line[2:].strip())
+        opening = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            if re.fullmatch(re.escape(fence[0]) + r"{%d,}\s*" % len(fence), stripped):
+                fence, gherkin, annotations, flows = None, False, [], []
+                continue
+            if not gherkin:
+                continue
+            if stripped.startswith("Scenario:"):
+                scenario = Scenario(stripped[len("Scenario:"):].strip(), number)
+                tc.scenarios.append(scenario)
+                annotations, flows = [], []
+            elif stripped.startswith("#"):
+                match = RE_GHERKIN_ANNOTATION.match(line)
+                if match:
+                    ids = RE_UC_ID.findall(match.group(1))
+                    annotations += ids
+                    flows += [(uc_id, flow.upper()) for uc_id, flow in RE_ANNOTATED_FLOW.findall(line) if uc_id in ids]
+            elif stripped:
+                step = RE_GHERKIN_STEP.match(line)
+                if step and scenario:
+                    scenario.steps.append((number, step.group(1), step.group(2), annotations))
+                    scenario.named_flows += [(number, uc_id, flow) for uc_id, flow in flows]
+                    annotations, flows = [], []
+                else:
+                    message = "'%s' is not a Given, When, Then, And or But step" % stripped
+                    (scenario.problems if scenario else tc.gherkin_problems).append((number, message))
             continue
-        if line.startswith("## "):
+        if opening:
+            fence = opening.group(1)
+            gherkin = opening.group(2).strip() == "gherkin"
+            if gherkin:
+                tc.gherkin_blocks += 1
+                scenario = None
+            continue
+        if line.startswith("# ") and tc.title is None:
+            tc.title = line[2:].strip()
+        elif line.startswith("## "):
             section = line[3:].strip()
             tc.section_lines[section] = number
-            continue
-        if not stripped:
-            continue
-        field, bullet, numbered = RE_FIELD.match(stripped), RE_BULLET.match(line), RE_NUMBERED.match(line)
-        cells = table_cells(line)
-        if section == "Overview" and field:
-            tc.fields[field.group(1)] = (field.group(2), number)
-        elif section == "Roles" and bullet:
-            tc.roles.append((number, bullet.group(1)))
-        elif section == "Preconditions" and bullet:
-            tc.preconditions.append((number, bullet.group(1)))
-        elif section == "Flow" and cells is not None:
-            if not tc.flow_header:
-                tc.flow_header = cells
-            elif not all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
-                tc.flow_rows.append((number, dict(zip(tc.flow_header, cells + [""] * (len(tc.flow_header) - len(cells))))))
-        elif section == "Validation" and numbered:
-            tc.validations.append((number, numbered.group(2)))
-        elif section == "Postconditions" and bullet:
-            tc.postconditions.append((number, bullet.group(1)))
+        else:
+            bullet = RE_BULLET.match(line)
+            if bullet and section in ("Roles", "Preconditions", "Postconditions"):
+                target = {"Roles": tc.roles, "Preconditions": tc.preconditions,
+                          "Postconditions": tc.postconditions}[section]
+                target.append((number, bullet.group(1)))
+    if fence and gherkin:
+        tc.gherkin_problems.append((len(lines), "gherkin block is not closed"))
     return tc
 
 
@@ -967,20 +2403,44 @@ def scan_units(root, uc, suffixes=None):
     Inside such a file, a line counts for a unit when it carries the unit's label.
     Lines that carry the qualified form (UC-001 BR-002) count wherever they are.
     """
+    return scan_units_in([root], uc, suffixes)
+
+
+def scan_units_in(roots, uc, suffixes=None):
+    """scan_units over several folders, for a project that keeps its tests in more than one: (files, hits).
+
+    The files of each folder come in the order scan_units gives them, folder after folder; a file that two
+    folders both hold counts once, under the first folder's spelling: overlapping folders, one folder given under
+    two spellings on a file system blind to case, or a folder and a link to it."""
+    files, seen = [], set()
+    for root in roots:
+        for path in sorted({path for path, _, _ in find_markers(root, uc.id, suffixes)}):
+            key = _identity(path) or os.path.abspath(path)
+            if key not in seen:
+                seen.add(key)
+                files.append(path)
+
+    def sources():
+        for path in files:
+            try:
+                yield path, read_lines(path)
+            except (UnicodeDecodeError, OSError):
+                continue
+
+    return files, scan_unit_lines(uc, sources())
+
+
+def scan_unit_lines(uc, sources):
+    """Map unit labels to hits in (path, lines) pairs already known to carry the use case id."""
     hits = {}
-    files = sorted({path for path, _, _ in find_markers(root, uc.id, suffixes)})
     labels = ["Main"] + [f.label for f in uc.flows if not f.retired] + [r.id for r in uc.rules if not r.retired]
     patterns = {label: unit_pattern(label) for label in labels}
-    for path in files:
-        try:
-            lines = read_lines(path)
-        except (UnicodeDecodeError, OSError):
-            continue
+    for path, lines in sources:
         for number, line in enumerate(lines, 1):
             for label, pattern in patterns.items():
                 if pattern is not None and pattern.search(line):
                     hits.setdefault(label, []).append((path, number, line.strip()))
-    return files, hits
+    return hits
 
 
 def compact_id(identifier):
@@ -988,15 +2448,67 @@ def compact_id(identifier):
     return identifier.replace("-", "")
 
 
-def iter_source_files(root, globs=None, skip=(".git", "node_modules", ".venv", "venv", "dist", "build", "target", "__pycache__")):
+# Dependency, build and hidden folders are excluded from every source search.
+SOURCE_SKIP = (".git", "node_modules", ".venv", "venv", "dist", "build", "target", "__pycache__")
+
+
+def git_list(root: str) -> Optional[list[str]]:
+    """Tracked and untracked, non-ignored paths relative to root; None without git."""
+    code, output = git(["-c", "core.quotePath=false", "ls-files", "-z", "--cached",
+                        "--others", "--exclude-standard"], cwd=root)
+    return sorted(set(output.rstrip("\0").split("\0")) - {""}) if code == 0 else None
+
+
+def source_path(path, skip=SOURCE_SKIP):
+    """Apply the walk's folder exclusions to a relative git path."""
+    return all(part not in skip and not part.startswith(".") for part in path.split("/")[:-1])
+
+
+def iter_source_files(root, globs=None, skip=SOURCE_SKIP):
     """Yield text files under root, skipping dependency and build folders. globs filters by suffix when given."""
     suffixes = tuple(globs) if globs else None
+    listed = git_list(root)
+    if listed is not None:
+        for relative in listed:
+            path = os.path.join(root, relative)
+            if source_path(relative, skip) and (not suffixes or relative.endswith(suffixes)) and os.path.isfile(path):
+                yield path
+        return
+    found = []
     for directory, names, files in os.walk(root):
         names[:] = [n for n in names if n not in skip and not n.startswith(".")]
         for name in sorted(files):
             if suffixes and not name.endswith(suffixes):
                 continue
-            yield os.path.join(directory, name)
+            found.append(os.path.join(directory, name))
+    yield from sorted(found)
+
+
+def _marker_patterns(uc_id):
+    return tuple(re.compile(r"(?<![A-Za-z0-9])%s(?!\d)" % re.escape(value))
+                 for value in (uc_id, compact_id(uc_id)))
+
+
+def ids_named_by_path(path: str) -> set[str]:
+    """Use case ids in a path, with the same boundaries as source markers."""
+    return {"UC-" + match.group(1) for match in
+            re.finditer(r"(?<![A-Za-z0-9])UC-?(\d{3})(?!\d)", path, re.IGNORECASE)}
+
+
+def _marker_paths(root, ids, suffixes=None):
+    """Narrow one or more marker searches in git, falling back only on errors."""
+    args = ["-c", "core.quotePath=false", "grep", "-z", "-l", "-F", "--untracked"]
+    for uc_id in sorted(set(ids)):
+        args.extend(("-e", uc_id, "-e", compact_id(uc_id)))
+    args.append("--")
+    args.extend("*" + suffix for suffix in (suffixes or ()))
+    code, output = git(args, cwd=root)
+    if code == 1:
+        return []
+    if code == 0:
+        return [os.path.join(root, path) for path in sorted(set(output.split("\0")) - {""})
+                if source_path(path)]
+    return iter_source_files(root, suffixes)
 
 
 def find_markers(root, uc_id, suffixes=None):
@@ -1004,18 +2516,427 @@ def find_markers(root, uc_id, suffixes=None):
 
     Returns [(path, line number, text)]. Binary and unreadable files are skipped.
     """
-    plain = re.compile(r"(?<![A-Za-z0-9])%s(?!\d)" % re.escape(uc_id))
-    compact = re.compile(r"(?<![A-Za-z0-9])%s(?!\d)" % re.escape(compact_id(uc_id)))
+    plain, compact = _marker_patterns(uc_id)
     hits = []
-    for path in iter_source_files(root, suffixes):
+    for path in _marker_paths(root, [uc_id], suffixes):
         try:
             with open(path, encoding="utf-8") as handle:
-                for number, line in enumerate(handle, 1):
-                    if plain.search(line) or compact.search(line):
-                        hits.append((path, number, line.rstrip("\n")))
+                text = handle.read()
         except (UnicodeDecodeError, OSError):
             continue
+        if "\0" in text or not (plain.search(text) or compact.search(text)):
+            continue
+        for number, line in enumerate(text.split("\n"), 1):
+            if plain.search(line) or compact.search(line):
+                hits.append((path, number, line))
     return hits
+
+
+# Flow and business-rule labels carried by change-record element cells.
+UNIT = re.compile(r"\b(A\d+|BR-\d{3})\b")
+
+
+def record_rows_from(lines, uc_id):
+    """Read differences rows with their units, evidence and use case ownership."""
+    for table in read_tables(lines):
+        header = [h.strip().lower() for h in table["header"]]
+        if "element" not in header or not any(h.startswith("today") for h in header):
+            continue
+        element_col = table["header"][header.index("element")]
+        seen_col = next((table["header"][i] for i, h in enumerate(header) if h.startswith("seen")), None)
+        rows = []
+        for _, row, _ in table["rows"]:
+            cell = row.get(element_col, "").strip()
+            if not cell or cell.startswith("["):
+                continue
+            other = [u for u in RE_UC_ID.findall(cell) if u != uc_id]
+            mine = True if uc_id in cell else (False if other else None)
+            units = [] if mine is False else UNIT.findall(cell)
+            rows.append((cell, units, row.get(seen_col, "").strip() if seen_col else None, mine))
+        return rows
+    return None
+
+
+def find_change_record(docs, uc_id):
+    """The newest record named after the use case or naming it in its metadata or differences."""
+    found = []
+    for path in docs.change_record_files():
+        name = os.path.basename(path)
+        named = name == uc_id + ".md" or name.startswith(uc_id + "-")
+        if not named:
+            named = uc_id in RE_UC_ID.findall(parse_change_record(path).element)
+        if not named:
+            named = any(mine is True for _, _, _, mine in (record_rows_from(read_lines(path), uc_id) or []))
+        if named:
+            found.append(path)
+    return max(found, key=lambda path: (os.path.getmtime(path), path)) if found else None
+
+
+# A test file by the names the common test runners use: test_x, x_test, x.test, x-test, x_spec, x.spec, x-spec,
+# XTest, XTests, and XIT for a JVM integration test: a CamelCase class name (OrderIT.java), never a name in
+# capitals or with underscores (V1__INIT.sql, SUBMIT.py), which is code. One rule for the finish check, the
+# spec-first guard, the end-of-turn question and reference search, so that none of them counts a test file as
+# code another counts.
+TEST_NAME = re.compile(r"(^test_|_test\.|\.test\.|-test\.|_spec\.|\.spec\.|-spec\.|Tests?\.[A-Za-z0-9]+$"
+                       r"|^[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*IT\.(?:java|kt|kts|groovy|scala)$)")
+# Folders that hold tests or their data, compared in lower case.
+TEST_FOLDERS = {"tests", "test", "__tests__", "spec", "specs", "e2e", "testing", "fixtures"}
+
+
+def is_test_path(path):
+    """A test file by its folder or its name."""
+    parts = path.replace("\\", "/").split("/")
+    return bool(TEST_NAME.search(parts[-1])) or any(part.lower() in TEST_FOLDERS for part in parts[:-1])
+
+
+# --- the spec-first reading of a change ---------------------------------------
+# The spec-first guard and the hook gate's end-of-turn question read a change with this one function.
+
+# Suffixes of source files that can change behavior; documents, data and configuration do not count.
+SOURCE_SUFFIXES = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java", ".kt", ".kts", ".go", ".rb",
+                   ".php", ".cs", ".rs", ".swift", ".scala", ".c", ".h", ".cc", ".cpp", ".hpp", ".sql", ".vue",
+                   ".svelte", ".ex", ".exs", ".dart", ".groovy")
+RE_NO_BEHAVIOR_CHANGE = re.compile(r"^\s*(?:[-*>]\s*)?no behaviou?r change\s*:\s*(.*)$", re.IGNORECASE)
+# The light path's note: a bug fixed against a clear specification, 'Fixes: UC-012 BR-005'.
+# It is read to reconcile, never validated; a 'Fixes:' line that names no use case, such as
+# an issue tracker's 'Fixes: #123', is not the note.
+RE_FIXES = re.compile(r"^\s*(?:[-*>]\s*)?fixes\s*:\s*(.*)$", re.IGNORECASE)
+RE_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+# Five file names fit one line of a message; the rest are counted.
+SHOWN_FILES = 5
+# Where setup installs the method's own scripts. They are the method's tools, not the project's behavior, and are
+# left out on purpose, not because their folder's name happens to be a test folder's.
+INSTALLED_SCRIPTS = "tools/specs"
+
+
+def is_behavior_code(path, docs_rel, patterns=()):
+    """A repository-relative path that can change behavior: outside the docs folder and the method's installed
+    scripts (INSTALLED_SCRIPTS), not a test, and matching one of the patterns when there are any, else a source file
+    by its suffix."""
+    import fnmatch
+    if path.startswith((docs_rel + "/", INSTALLED_SCRIPTS + "/")) or is_test_path(path):
+        return False
+    if patterns:
+        return any(fnmatch.fnmatch(path, p) for p in patterns)
+    return path.endswith(SOURCE_SUFFIXES)
+
+
+def behavior_declarations(text):
+    """(complete, incomplete): the values of 'No behavior change:' lines at the start of a line, outside
+    comments. A complete one names a use case or says none."""
+    complete, incomplete = [], []
+    for line in RE_HTML_COMMENT.sub("", text).splitlines():
+        match = RE_NO_BEHAVIOR_CHANGE.match(line)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if RE_UC_ID.search(value) or re.match(r"none\b", value, re.IGNORECASE):
+            complete.append(value)
+        else:
+            incomplete.append(value)
+    return complete, incomplete
+
+
+def fixes_notes(text):
+    """The values of 'Fixes:' lines at the start of a line, outside comments, that name a use case."""
+    return [match.group(1).strip() for line in RE_HTML_COMMENT.sub("", text).splitlines()
+            for match in [RE_FIXES.match(line)] if match and RE_UC_ID.search(match.group(1))]
+
+
+class SpecFirstReading(NamedTuple):
+    """How the spec-first rule reads one change: its behavior files, its specification files, the values of
+    its 'No behavior change:' lines and of its 'Fixes:' notes."""
+    behavior: list
+    specs: list
+    complete: list
+    incomplete: list
+    fixes: tuple = ()
+
+    def code_without_spec(self) -> bool:
+        """Behavior code changed with no specification change, no complete declaration and no 'Fixes:' note."""
+        return bool(self.behavior) and not self.specs and not self.complete and not self.fixes
+
+    def shown(self) -> str:
+        """The behavior files for a message: the first SHOWN_FILES, then a count of the rest."""
+        shown = ", ".join(self.behavior[:SHOWN_FILES])
+        if len(self.behavior) > SHOWN_FILES:
+            shown += " and %d more" % (len(self.behavior) - SHOWN_FILES)
+        return shown
+
+    def summary(self, docs_rel) -> str:
+        """The one sentence both readers show for code without a specification."""
+        return ("%d behavior file(s) changed (%s) with no specification change under %s/, no line "
+                "'No behavior change: UC-XXX' and no note 'Fixes: UC-XXX BR-YYY'" % (len(self.behavior), self.shown(), docs_rel))
+
+
+def read_change(changed, docs_rel, kind, messages, patterns=()):
+    """Read a change as the spec-first rule does.
+
+    changed: repository-relative paths; kind: the artifact kind of such a path (Docs.kind); messages: the commit
+    messages and descriptions that may carry the declaration; patterns: globs that limit behavior code."""
+    behavior = [path for path in changed if is_behavior_code(path, docs_rel, patterns)]
+    specs = [path for path in changed if kind(path) in SPEC_KINDS]
+    complete, incomplete = behavior_declarations(messages)
+    return SpecFirstReading(behavior, specs, complete, incomplete, fixes_notes(messages))
+
+
+# --- one element of a use case, as the guard check and the finish check name it ---
+
+# The element names of the finish check: a rule, a flow, a main step, a precondition, a success or failure
+# postcondition. Steps are written 'Step 4' (the change list's spelling); 'step 4' is accepted.
+RE_ELEMENT = re.compile(r"^(UC-\d{3})\s+(?:BR-(\d{3})|A(\d+)|step\s+(\d+)|pre-(\d+)|post-([SF])-(\d+))$", re.IGNORECASE)
+# How each kind of element is spelled inside a test name, after spaced(): BR-005 as br005, br_005 or BR-5; A2 as a2
+# or a_2 (never "a 2", which is prose); Step 3 as step3 or step_3; Pre-1 as pre1 or precondition_1; Post-S-1 as
+# post_s_1, postS1 or postcondition_success_1.
+NAME_PREFIXES = {"BR-": "br[-_ ]?", "A": "a[-_]?", "Step ": "step[-_ ]?", "Pre-": "pre(?:condition)?[-_ ]?",
+                 "Post-S-": "post(?:condition)?[-_ ]?s(?:uccess)?[-_ ]?",
+                 "Post-F-": "post(?:condition)?[-_ ]?f(?:ailure)?[-_ ]?"}
+
+
+def spaced(text):
+    """Lower case, with a separator at every camelCase and letter-digit boundary: testUc012Br005 -> test_uc_012_br_005."""
+    text = re.sub(r"(?<=[a-z])(?=[A-Z])", "_", text)
+    return re.sub(r"(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])", "_", text).lower()
+
+
+def _numbered(prefix, number):
+    return re.compile(r"(?<![a-z0-9])%s0*%d(?![0-9])" % (prefix, number))
+
+
+class Element(NamedTuple):
+    """One element of a use case: its use case ('UC-012'), its kind (a key of NAME_PREFIXES) and its number."""
+    use_case: str
+    kind: str
+    number: int
+
+    @classmethod
+    def parse(cls, text):
+        """'UC-012 BR-005', 'UC-012 step 3', 'UC-012 Post-S-1' ...; None when the text names no element."""
+        match = RE_ELEMENT.match(" ".join(str(text).split()))
+        if not match:
+            return None
+        uc_id, rule, flow, step, pre, post_kind, post = match.groups()
+        kind, number = next((kind, value) for kind, value in (
+            ("BR-", rule), ("A", flow), ("Step ", step), ("Pre-", pre),
+            ("Post-%s-" % (post_kind or "").upper(), post)) if value)
+        return cls(uc_id.upper(), kind, int(number))
+
+    @property
+    def name(self):
+        """The element in the finish check's spelling: BR-005, A2, Step 3, Pre-1, Post-S-1."""
+        return ("BR-%03d" if self.kind == "BR-" else self.kind + "%d") % self.number
+
+    def __str__(self):
+        return "%s %s" % (self.use_case, self.name)
+
+    def text(self, uc):
+        """The element's text with its whitespace normalized: a rule with its body and its Examples table, a flow
+        with its trigger, steps and ending, a step, a precondition, a postcondition. None when the use case has no
+        such element."""
+        if self.kind == "BR-":
+            return next((rule_text(rule) for rule in uc.rules if rule.id == self.name), None)
+        if self.kind == "A":
+            return next((flow_text(flow) for flow in uc.flows if flow.label == self.name), None)
+        if self.kind == "Step ":
+            return next((norm_text(step.text) for step in uc.steps if step.number == self.number), None)
+        items = {"Pre-": uc.preconditions, "Post-S-": uc.success, "Post-F-": uc.failure}[self.kind]
+        return norm_text(items[self.number - 1][1]) if 0 < self.number <= len(items) else None
+
+    def named_in(self, line):
+        """The line holds both the use case and the element, in common spellings."""
+        line = spaced(line)
+        return bool(_numbered("uc[-_ ]?", int(self.use_case[3:])).search(line)
+                    and _numbered(NAME_PREFIXES[self.kind], self.number).search(line))
+
+
+# Sixteen hex digits (64 bits) tell two versions of one element or one file apart; a collision would need
+# billions of versions.
+FINGERPRINT_DIGITS = 16
+
+
+def fingerprint(data):
+    """A short fingerprint of a text or of bytes: the first FINGERPRINT_DIGITS of its SHA-256."""
+    return hashlib.sha256(data if isinstance(data, bytes) else data.encode("utf-8")).hexdigest()[:FINGERPRINT_DIGITS]
+
+
+# --- the guard-check log (DIR/reviews/guard-checks.md): guard_check.py writes it, finish_change.py reads it ---
+
+class GuardRow(NamedTuple):
+    """One row of the guard-check log. current is False for a row of a table written before upspec 1.3.0 (Unit and
+    Verdict columns, no fingerprints)."""
+    when: str = ""
+    element: str = ""
+    file: str = ""
+    find: str = ""
+    replace: str = ""
+    element_fingerprint: str = ""
+    file_fingerprint: str = ""
+    test: str = ""
+    failed_test: str = ""
+    verdict: str = ""
+    line: int = 0
+    current: bool = True
+
+
+GUARD_LOG_NAME = os.path.join("reviews", "guard-checks.md")
+# The log's column for each field of GuardRow that is written.
+GUARD_COLUMN_OF = {"when": "When (UTC)", "element": "Element", "file": "File", "find": "Find", "replace": "Replace",
+                   "element_fingerprint": "Element fingerprint", "file_fingerprint": "File fingerprint",
+                   "test": "Test", "failed_test": "Failed test", "verdict": "Verdict"}
+GUARD_WRITTEN = tuple(field for field in GuardRow._fields if field in GUARD_COLUMN_OF)
+GUARD_COLUMNS = tuple(GUARD_COLUMN_OF[field] for field in GUARD_WRITTEN)
+GUARD_TITLE = ("# Guard checks\n\nOne row per deliberate break, written by guard_check.py. The newest row for an "
+               "element is its current result.\n")
+GUARD_TABLE = ("\nEach text is kept whole: in a cell, \\\\ is a backslash, \\| a pipe, \\n a line break, \\r a carriage "
+               "return, \\t a tab, \\s a space at either end and \\uXXXX any other control character, line separator "
+               "or blank at either end. The fingerprints are of the element's text and of the file, when the row was "
+               "written.\n\n| %s |\n|%s\n" % (" | ".join(GUARD_COLUMNS), "---|" * len(GUARD_COLUMNS)))
+_CELL_NAMED = {"\\": "\\\\", "|": "\\|", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+_CELL_DECODED = {"\\": "\\", "|": "|", "n": "\n", "r": "\r", "t": "\t", "s": " "}
+
+
+def _escape_char(char, edge):
+    """A character as a cell holds it: the named escapes; a space at either end as \\s; a control character, a line
+    or paragraph separator, or another blank at either end as \\uXXXX. Every other character is kept as it is."""
+    if char in _CELL_NAMED:
+        return _CELL_NAMED[char]
+    if edge and char == " ":
+        return "\\s"
+    if unicodedata.category(char) in ("Cc", "Zl", "Zp") or (edge and char.isspace()):
+        return "\\u%04x" % ord(char)
+    return char
+
+
+def encode_cell(text):
+    """A text as one table cell that keeps it whole: decoded by split_escaped_row to the same text, on one line,
+    whatever its characters."""
+    text = str(text)
+    start = len(text) - len(text.lstrip())
+    end = len(text.rstrip())
+    return "".join(_escape_char(char, index < start or index >= end) for index, char in enumerate(text))
+
+
+def _decode_cell(cell):
+    out, index = [], 0
+    while index < len(cell):
+        pair = cell[index:index + 2]
+        if pair[:1] == "\\" and pair[1:] == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", cell[index + 2:index + 6]):
+            out.append(chr(int(cell[index + 2:index + 6], 16)))
+            index += 6
+        elif pair[:1] == "\\" and pair[1:] in _CELL_DECODED:
+            out.append(_CELL_DECODED[pair[1:]])
+            index += 2
+        else:
+            out.append(cell[index])
+            index += 1
+    return "".join(out)
+
+
+def split_escaped_row(line):
+    """The cells of a table row written with encode_cell, decoded; None when the line is not a row."""
+    text = line.strip()
+    if not (text.startswith("|") and text.endswith("|")):
+        return None
+    cells, current, index = [], [], 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            current.append(text[index:index + 2])
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    if current and "".join(current).strip():
+        return None                  # the last pipe was escaped: not a row
+    return [_decode_cell(cell.strip()) for cell in cells]
+
+
+def _element_name(text):
+    element = Element.parse(text)
+    return str(element) if element else text.strip()
+
+
+def read_guard_log(path):
+    """Every row of the guard-check log in file order, the newest last, as GuardRow. The element is in the finish
+    check's spelling when it names one. An empty list when there is no log; OSError or UnicodeDecodeError when it
+    cannot be read, a link that cannot be resolved in its place included (link_error)."""
+    if unresolved_link(path):
+        raise link_error(path)
+    if not os.path.isfile(path):
+        return []
+    rows, header, current = [], None, False
+    for number, line in outside_fences(read_lines(path)):
+        plain = table_cells(line)
+        if plain is None:
+            header = None
+            continue
+        if header is None:
+            header, current = plain, tuple(plain) == GUARD_COLUMNS
+            continue
+        if table_separator(plain):
+            continue
+        if current:
+            cells = split_escaped_row(line)
+            if cells is None:
+                continue
+            row = GuardRow(**dict(zip(GUARD_WRITTEN, cells + [""] * len(GUARD_WRITTEN))), line=number)
+        elif "Verdict" in header and ("Unit" in header or "Element" in header):
+            named = dict(zip(header, plain + [""] * (len(header) - len(plain))))
+            row = GuardRow(when=named.get("When (UTC)", ""), element=named.get("Unit", named.get("Element", "")),
+                           file=named.get("File", ""), test=named.get("Test", ""), verdict=named.get("Verdict", ""),
+                           line=number, current=False)
+        else:
+            continue
+        rows.append(row._replace(element=_element_name(row.element), verdict=row.verdict.strip()))
+    return rows
+
+
+def append_guard_row(docs_dir, row):
+    """Append one GuardRow to the log; a log whose last table is not of GUARD_COLUMNS, an earlier log or one edited
+    by hand, gets a new table below it. Returns the log's path; OSError when it cannot be written, and before anything
+    is written when a link that cannot be resolved stands in its place: nothing is written through it."""
+    path = os.path.join(docs_dir, GUARD_LOG_NAME)
+    if unresolved_link(path):
+        raise link_error(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    text = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    last_header = None          # the header of the table the file ends in
+    for line in (text.rstrip("\n").split("\n") if text.strip() else []):
+        cells = table_cells(line)
+        if cells is None:
+            last_header = None
+        elif last_header is None:
+            last_header = tuple(cells)
+    head = ""
+    if not text.strip():
+        head = GUARD_TITLE + GUARD_TABLE
+    elif last_header != GUARD_COLUMNS:
+        head = ("" if text.endswith("\n") else "\n") + GUARD_TABLE
+    elif not text.endswith("\n"):
+        head = "\n"
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(head + "| %s |\n" % " | ".join(encode_cell(getattr(row, field)) for field in GUARD_WRITTEN))
+    return path
+
+
+def find_use_case(docs, uc_id):
+    """The specification file of a use case, by its file name, in any tolerated spelling of the use case folder;
+    None when there is none. The scripts that find a use case's file from its id use this one search; the journey
+    check (check_test_case.py) instead matches the id each use case's front matter holds."""
+    for spelling in DOC_FOLDERS["use_case_dir"]:
+        folder = os.path.join(docs.root, spelling)
+        for path in _matching(folder if os.path.isdir(folder) else None, r"^UC-\d{3}.*\.md$"):
+            name = os.path.basename(path)
+            if name.startswith(uc_id + "-") or name == uc_id + ".md":
+                return path
+    return None
 
 
 # --- markers on code nothing calls ------------------------------------------
@@ -1094,6 +3015,12 @@ def _diff_steps(prefix, old, new, changes):
             changes.append({"change": "added", "element": "%s %d" % (prefix, new[j].number), "old": None, "new": new_texts[j]})
 
 
+def rule_text(rule):
+    """A rule as the guard check fingerprints it: its name, then each line of its body and Examples table, whitespace
+    normalized, one per line."""
+    return "\n".join([norm_text(rule.name)] + [norm_text(text) for _, text in rule.body if text.strip()])
+
+
 def flow_text(flow):
     ending = "ends" if flow.ending and flow.ending[0] == "ends" else ("continues at step %s" % flow.ending[1] if flow.ending else "no ending")
     return "%s | trigger: %s | %s | %s" % (flow.name, norm_text(flow.trigger), " / ".join(norm_text(s.text) for s in flow.steps), ending)
@@ -1154,7 +3081,338 @@ def git(args, cwd="."):
     try:
         # 60 seconds: history walks on large repositories take seconds, never minutes;
         # a longer wait means git is blocked on a prompt and should be abandoned.
-        done = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True, text=True, timeout=60)
+        done = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="surrogateescape", timeout=60)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, str(exc)
     return done.returncode, done.stdout
+
+
+RE_OLD_UC_FIELD = re.compile(r"^\*\*Use Case ID:\*\*")
+RE_OLD_TC_FIELD = re.compile(r"^\*\*ID:\*\*")
+
+
+def old_formats(docs, unreadable=None, not_searched=None):
+    """Every file still in an earlier format: [(path, line, what)]. Reads nothing else of the project but the vision, the
+    overview and the recovery ledger and change log, which it reads only to name one that cannot be read.
+
+    A file that cannot be read raises OSError or UnicodeDecodeError, unless unreadable is a list: the file is then
+    added to it as (path, error) and the other files are still read, so that one unreadable file does not hide an
+    earlier format in another. A link that cannot be resolved, in place of the specification folder or of an
+    artifact in it (Docs.unresolved, the recovery records included), is such a file: never an absent one, and its
+    error names it as a link (link_error). So is a specification folder behind such a link or behind a folder that
+    cannot be searched, on the way from the top of the file system (unreachable), and the specification folder or a
+    canonical folder that can be listed and not searched (unsearchable). The listing of a folder is part of the same
+    pass: a folder that cannot be listed is such a file too, and so is whatever the search for change records could
+    not look into and the method owns (Docs.record_search_unreadable). Each path is added once.
+
+    Any other folder the search for change records could not look into (a tool's cache, node_modules) is not such a
+    file: it never raises nor goes into unreadable. When not_searched is a list it is added to it as (path, error)."""
+    found = []
+    seen = {os.path.abspath(path) for path, _ in unreadable or [] if path}
+
+    def note(path, exc):
+        exc = explained(exc, path)
+        if unreadable is None:
+            raise exc
+        if not path or os.path.abspath(path) not in seen:
+            seen.add(os.path.abspath(path) if path else None)
+            unreadable.append((path, exc))
+
+    def tolerant(read, path):
+        try:
+            return read()
+        except (OSError, UnicodeDecodeError) as exc:
+            note(path, exc)
+            return []
+
+    def lines(path):
+        return tolerant(lambda: read_lines(path), path)
+
+    blocked = unreachable(docs.root) or (docs.root, unsearchable(docs.root))
+    if blocked[1]:
+        note(docs.root, blocked[1])
+    for path in sorted(getattr(docs, "unresolved", {}).values()):
+        note(path, link_error(path))
+    # A canonical folder whose names can be listed and that cannot be searched holds nothing that can be read.
+    for attribute in DOC_FOLDERS:
+        folder = getattr(docs, attribute, None)
+        if folder and unsearchable(folder):
+            note(folder, unsearchable(folder))
+    for name in ("use_cases.puml", "use-cases.puml"):
+        path = os.path.join(docs.root, name)
+        if os.path.isfile(path):
+            found.append((path, 1, "PlantUML use case diagram"))
+    for name, convention in (("entity-model.md", "entity_model.md"), ("requirements_catalog.md", "requirements.md")):
+        path = os.path.join(docs.root, name)
+        if os.path.isfile(path):
+            found.append((path, 1, "older file name (the convention is %s)" % convention))
+    for path in tolerant(docs.use_case_files, docs.use_case_dir):
+        hit = next((n for n, line in outside_fences(lines(path)) if RE_OLD_UC_FIELD.match(line.strip())), None)
+        if hit:
+            found.append((path, hit, "bold Overview fields instead of front matter"))
+    for path in tolerant(docs.test_case_files, docs.test_case_dir):
+        hit = next((n for n, line in outside_fences(lines(path)) if line.strip() == "## Flow"), None)
+        if hit:
+            found.append((path, hit, "journey Flow table"))
+    if docs.entity_model:
+        hit = next((n for n, line in outside_fences(lines(docs.entity_model)) if "Length/Precision" in line), None)
+        if hit:
+            found.append((docs.entity_model, hit, "database columns in the entity model"))
+    if docs.requirements:
+        hit = next((n for n, line in outside_fences(lines(docs.requirements)) if "User Story" in line), None)
+        if hit:
+            found.append((docs.requirements, hit, "user story column in the requirements"))
+    # Read whole in the same pass, though no earlier format lives in them: the vision, the overview and the recovery
+    # ledger and change log, which the router, the lint, the overview generator and the model read. One that cannot be
+    # read is named here, never left to end a command in a decoding error or to be reported under no name.
+    recovery = [os.path.join(docs.recovery_dir, name) for name in RECOVERY_FILES.values()] if docs.recovery_dir else []
+    for path in [docs.vision, docs.overview] + recovery:
+        if path and os.path.isfile(path):
+            lines(path)
+    search = getattr(docs, "record_search_unreadable", None)
+    for path, exc in (search() if not_searched is None else search(not_searched)) if search else []:
+        note(path, exc)
+    for path in docs.change_record_files():
+        hit = next((n for n, line in outside_fences(lines(path)) if line.strip() == "### Classification"), None)
+        if hit:
+            found.append((path, hit, "the long change record"))
+    return found
+
+
+def stop_if_old(docs, stream=None, report=None, *, strict, unreadable=None):
+    """Return the exit code the caller stops with, or None when it can go on.
+
+    Every file is checked for the earlier formats, also past one that cannot be read, a link that cannot be resolved
+    in place of an artifact included. Earlier formats stop with 5, and each unreadable file is named beside them as
+    UNREADABLE on the same stream as the migration notice: the earlier formats win.
+
+    Without an earlier format, an unreadable file stops the caller too, because no caller continues parsing after a
+    read error, and is reported as the finding UNREADABLE, one per file, to the supplied reporter or to the same
+    stream as the migration notice. It then stops with 0, or 1 when strict, as any other finding. strict is required
+    and has two states: a check passes its --strict; a script that writes or lists passes True, because it cannot
+    do its work without the file; a library whose own result is 1 on a problem (the finish check, the validator)
+    passes True and leaves --strict to its command line.
+
+    With unreadable, a list, a file that cannot be read does not stop the caller: it is added to the list as
+    (path, error) for the caller to report, and only an earlier format stops it.
+
+    A folder the search for change records could not look into and that the method does not own (old_formats'
+    not_searched) stops nothing, with --strict too: it gets a note on the stream (not_searched_notes), whatever the
+    caller then does.
+    """
+    stream = sys.stderr if stream is None else stream
+    files = [] if unreadable is None else unreadable
+    not_searched = []
+    found = old_formats(docs, files, not_searched)
+    not_searched_notes(not_searched, stream)
+
+    def message(exc):
+        return "cannot read specification artifacts for old-format recognition: %s" % exc
+
+    if found:
+        for path, line, what in found:
+            stream.write("%s:%d: ERROR OLD_FORMAT: %s\n" % (path, line, what))
+        for path, exc in files:
+            stream.write("%s:0: ERROR UNREADABLE: %s\n" % (path, message(exc)))
+        stream.write("This project uses upspec's earlier formats. Migrate it first: the skill up-migrating-spec-formats "
+                     "(scripts/migrate_formats.py plan).\n")
+        return OLD_FORMAT_EXIT
+    if unreadable is not None or not files:
+        return None
+    for path, exc in files:
+        if report is not None:
+            report.error(path, 0, "UNREADABLE", "-", message(exc))
+        else:
+            stream.write("%s:0: ERROR UNREADABLE: %s\n" % (path, message(exc)))
+    return 1 if strict else 0
+
+
+class ChangeRecord(_WithFrontMatter):
+    """The metadata and headings of a short change record."""
+
+    def __init__(self, path):
+        self.path = path
+        lines = read_lines(path)
+        self.front_matter = front_matter(lines)
+        start = self.front_matter.body_start
+        self.sections = {title: number + start for title, number, _ in sections(lines[start:], 2)}
+        self.element = _as_text(self.meta.get("element", ("", 0))[0])
+        self.outcome = _as_text(self.meta.get("outcome", ("", 0))[0])
+
+
+def parse_change_record(path):
+    return ChangeRecord(path)
+
+
+def _metadata_findings(path, fm, required):
+    """The front matter problems, and a finding for each required key that is missing or empty, except a key
+    already refused as a value on several lines: that refusal is its one finding."""
+    found = []
+    for line, message in fm.problems:
+        found.append((path, line, "FRONT_MATTER", message))
+    meta = fm.meta
+    for key in required:
+        if key in fm.refused:
+            continue
+        value, line = meta.get(key, ("", 1))
+        if key not in meta or (isinstance(value, str) and not value.strip()):
+            found.append((path, line, "FRONT_MATTER", "required key '%s' is missing or empty" % key))
+    return found
+
+
+def use_case_format_findings(uc):
+    """Current-format findings for one parsed use case, regardless of its file name."""
+    def add(path, line, code, message):
+        found.append((path, line, code, message))
+
+    found = _metadata_findings(uc.path, uc.front_matter, UC_REQUIRED_KEYS)
+    if uc.is_stub:
+        if uc.status != "Draft":
+            add(uc.path, uc.field_line("Status"), "STUB", "a stub must have status Draft")
+        return found
+    for rule in uc.rules:
+        if rule.retired:
+            continue
+        examples = rule.examples
+        if not examples:
+            add(uc.path, rule.line, "EXAMPLES_FORM", "rule needs an Examples table")
+            continue
+        if not rule.examples_blank_before:
+            add(uc.path, examples["line"], "EXAMPLES_FORM",
+                "the Examples table needs a blank line before it, or it does not render as a table")
+        header = examples["header"]
+        if not examples.get("separator"):
+            add(uc.path, examples["line"], "EXAMPLES_FORM", "the Examples table needs a separator line (|---|---|)")
+        elif len(examples["separator"][1]) != len(header):
+            add(uc.path, examples["separator"][0], "EXAMPLES_FORM", "Examples separator must match column count")
+        if len(header) < 2 or header[-1] != "result":
+            add(uc.path, examples["line"], "EXAMPLES_FORM", "Examples needs input columns followed by result")
+        # Two contrasting rows are the minimum evidence for the two
+        # sides of a boundary required by the method and design 07.
+        if len(examples["rows"]) < 2:
+            add(uc.path, examples["line"], "EXAMPLES_FORM", "Examples needs rows on both sides of the boundary")
+        for line, cells in examples["rows"]:
+            if len(cells) != len(header) or any(not cell.strip() for cell in cells):
+                add(uc.path, line, "EXAMPLES_FORM", "Examples row must fill every column")
+    return found
+
+
+def format_findings(docs, kinds=None):
+    """All current-format errors as (path, line, code, message).
+
+    The vocabulary and structural checks live here so CLI checks, hooks and
+    migration verification report the same errors. Semantic checks stay with
+    their callers. Earlier formats must be refused with stop_if_old first.
+    """
+    selected = set(kinds if kinds is not None else
+                   ("use_case", "journey", "requirements", "entity_model", "record"))
+    found = []
+
+    def add(path, line, code, message):
+        found.append((path, line, code, message))
+
+    def metadata(path, fm, required):
+        found.extend(_metadata_findings(path, fm, required))
+
+    if "use_case" in selected:
+        if docs.overview:
+            metadata(docs.overview, front_matter(read_lines(docs.overview)), ("system",))
+        for uc in load_use_cases(docs):
+            found.extend(use_case_format_findings(uc))
+    if "journey" in selected:
+        for path in docs.test_case_files():
+            tc = parse_test_case(path)
+            metadata(path, tc.front_matter, TC_REQUIRED_KEYS)
+            if tc.gherkin_blocks != 1 or len(tc.scenarios) != 1:
+                add(path, 1, "GHERKIN_FORM", "journey needs exactly one gherkin block and one Scenario")
+            for line, message in tc.gherkin_problems:
+                add(path, line, "GHERKIN_FORM", message)
+            commented = set()
+            # A list of use cases refused as a value on several lines names none; its refusal is the finding.
+            listed = None if "use_cases" in tc.front_matter.refused else tc.use_case_ids()
+            for scenario in tc.scenarios:
+                if not scenario.name or not scenario.steps:
+                    add(path, scenario.line, "GHERKIN_FORM", "Scenario needs a name and steps")
+                for line, message in scenario.problems:
+                    add(path, line, "GHERKIN_FORM", message)
+                for line, _, _, ids in scenario.steps:
+                    commented.update(ids)
+                    for uid in ids:
+                        if listed is not None and uid not in listed:
+                            add(path, line, "GHERKIN_FORM", "comment names unlisted use case %s" % uid)
+            for uid in tc.use_case_ids():
+                if uid not in commented:
+                    add(path, tc.field_line("use_cases"), "GHERKIN_FORM", "listed use case %s is never commented" % uid)
+    if "requirements" in selected and docs.requirements:
+        reqs, tables = parse_requirements(docs.requirements)
+        req_headers = {
+            "FR": ["ID", "Role", "Need", "Priority", "Status"],
+            "NFR": ["ID", "Title", "Statement", "Category", "Verification", "Priority", "Status"],
+            "C": ["ID", "Title", "Statement", "Category", "Source", "Priority", "Status"],
+        }
+        for table in tables:
+            header = table["header"]
+            row_kinds = {row.get(header[0], "").split("-")[0] for _, row, _ in table["rows"]} if header else set()
+            kind = next((k for k in req_headers if k in row_kinds), None)
+            if not kind and (not header or header[0].strip().upper() != "ID"):
+                continue
+            if not table.get("separator"):
+                add(docs.requirements, table["line"], "TABLE_SEPARATOR", "requirements table needs a separator line (|---|---|)")
+            elif len(table["separator"][1]) != len(header):
+                add(docs.requirements, table["separator"][0], "TABLE_COLUMNS", "requirements table separator must match column count")
+            expected_header = req_headers.get(kind)
+            if not expected_header and "Role" in header:
+                expected_header = req_headers["FR"]
+            elif not expected_header and "Source" in header:
+                expected_header = req_headers["C"]
+            elif not expected_header and ("Verification" in header or "Statement" in header):
+                expected_header = req_headers["NFR"]
+            if not expected_header:
+                add(docs.requirements, table["line"], "TABLE_COLUMNS", "unknown requirements table columns")
+            if expected_header:
+                if header != expected_header:
+                    add(docs.requirements, table["line"], "TABLE_COLUMNS",
+                        "table columns must be: %s" % " | ".join(expected_header))
+                for number, row, count in table["rows"]:
+                    if count != len(header):
+                        add(docs.requirements, number, "TABLE_COLUMNS", "requirements table row must have %d columns" % len(header))
+        for req in reqs:
+            if req.kind == "FR" and (not req.role.strip() or not req.need.strip()):
+                add(docs.requirements, req.line, "NEED_FORM", "functional requirement needs Role and Need")
+            elif req.kind in ("NFR", "C") and not ears_ok(req.statement):
+                add(docs.requirements, req.line, "NEED_FORM", "Statement must follow an EARS pattern")
+    if "entity_model" in selected and docs.entity_model:
+        entity_columns = ["Attribute", "Meaning", "Type", "Rules"]
+        entities = parse_entity_model(docs.entity_model)
+        for entity in entities.entities.values():
+            if entity.header:
+                if not entity.separator:
+                    add(docs.entity_model, entity.header_line, "TABLE_SEPARATOR", "entity table needs a separator line (|---|---|)")
+                elif len(entity.separator[1]) != len(entity.header):
+                    add(docs.entity_model, entity.separator[0], "TABLE_COLUMNS", "entity table separator must match column count")
+                if entity.header != entity_columns:
+                    add(docs.entity_model, entity.header_line, "TABLE_COLUMNS",
+                        "table columns must be: %s" % " | ".join(entity_columns))
+                for line, row, count in entity.attributes:
+                    if count != len(entity.header):
+                        add(docs.entity_model, line, "TABLE_COLUMNS", "entity table row must have %d columns" % len(entity.header))
+            for line, row, _ in entity.attributes:
+                text = row.get("Type", "")
+                if not entity_type_ok(text):
+                    add(docs.entity_model, line, "ENTITY_TYPE", "unknown business type '%s'" % text)
+                reference = RE_REFERENCE.fullmatch(text.strip())
+                if reference and not any({left, right} == {entity.name, reference.group(1)}
+                                         for _, left, right, _ in entities.relationships):
+                    add(docs.entity_model, line, "REFERENCE_NO_RELATIONSHIP",
+                        "Reference to %s needs a relationship in the diagram" % reference.group(1))
+    if "record" in selected:
+        for path in docs.change_record_files():
+            record = parse_change_record(path)
+            required = ("outcome", "element") + (("decided_by",) if record.outcome in ("2", "4", "5", "6") else ())
+            metadata(path, record.front_matter, required)
+            if record.outcome not in RECORD_OUTCOMES:
+                add(path, record.meta.get("outcome", ("", 1))[1], "RECORD_FORM", "unknown outcome '%s'" % record.outcome)
+            for title in RECORD_REQUIRED_SECTIONS:
+                if title not in record.sections:
+                    add(path, 1, "RECORD_FORM", "required section '%s' is missing" % title)
+    return found

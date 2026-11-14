@@ -3,12 +3,17 @@
 
 One command for the steps that are easy to skip. It checks:
 
-  scope    every changed file belongs to the use case, or to another use case
-           the same change record names (the scope audit)
+  scope    unattributed files warn; a file changed in this session whose path
+           names a use case outside this change blocks (the scope audit)
   markers  every rule in the change carries its marker UC-XXX BR-YYY in the code
   tests    every flow and rule in the change is named by a test of the use case
   guard    every rule in the change has a break that a test caught, in the guard-check
-           log written by guard_check.py (DIR/reviews/guard-checks.md)
+           log written by guard_check.py (DIR/reviews/guard-checks.md): the newest
+           row of the rule counts, and only a caught one; it is stale when the
+           rule's text (with its Examples table) or the enforcing file changed
+           since it was logged, or when it is in the format before upspec 1.3.0,
+           and the report says to run the guard check again. Not detected: a
+           test weakened while the rule and its file stay unchanged
   decisions every owner decision in the change record names the specification
            element that carries it (Lives in), and that element exists; a
            decision kept only in the record is lost to the implementation
@@ -22,7 +27,8 @@ One command for the steps that are easy to skip. It checks:
   (warns)  a rule marker right above a function that no other code refers to:
            the marker sits on code nothing calls
   (warns)  with the A-files (ACTIVE.md with a hot zone): the use case's Status moved
-           since the base while ABILITIES.md and ACTIVE.md stayed unchanged
+           since the base while ABILITIES.md and ACTIVE.md stayed unchanged (ACTIVE.md
+           alone in a project without ABILITIES.md)
   pinning  every row of the change record whose today's behavior was only read
            from the code is pinned by a test that was there before the code
            changed: in the base, or in a commit that changed tests and documents
@@ -43,43 +49,48 @@ Requested by | Seen in. Seen in says how today's behavior is known: `code` (read
 from the code: pin it with a test before changing it), `test <name>` (pinned by
 that test), or `observed` (seen on the running system).
 
-Exit code 0 when everything it can check holds, 1 when something is missing or
-could not be checked, 2 on usage errors.
+Exit code 0 when it ran, ready or not, an unreadable file included: the report
+says which (with --strict 1 when something is missing or unreadable), 2 on usage
+errors.
 
 Usage:
     finish_change.py UC-012 [--base REF] [--docs DIR] [--code DIR] [--tests DIR]
-                     [--record FILE] [--format text|json]
+                     [--record FILE] [--claim] [--format text|json] [--strict]
 
 --base defaults to HEAD (uncommitted work); on a feature branch pass the branch
 it started from. --code and --tests default to the repository; test files are
 recognized by their names and folders (test_x, x_test, x.test, x.spec, XTest,
 tests/, __tests__/). --record defaults to the newest file in a change-records
-folder under docs that is named after the use case or names it in its Element
-line or its differences table (one change may cover several use cases).
+folder under docs that is named after the use case or names it in its element
+metadata or its differences table (one change may cover several use cases).
+
+With --claim, the whole use case is checked unless changed, present change
+records name it. Every such record must be ready. Imported callers can pass
+a spill set to identify this session's paths; otherwise it is the working tree.
 
 Requires Python 3.9+, standard library only, and git for the scope audit. Reads only.
 """
+from __future__ import annotations
+
 import argparse
-import glob
-import json
+import copy
+import io
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spec_model as model  # noqa: E402  (local module, same folder)
+import change_view  # noqa: E402
 import scope_audit  # noqa: E402
 import uc_change_list  # noqa: E402
 import unrecorded_changes  # noqa: E402
 
-TEST_NAME = re.compile(r"(^test_|_test\.|\.test\.|\.spec\.|_spec\.|Tests?\.[A-Za-z]+$)")
-TEST_FOLDERS = {"tests", "test", "__tests__", "spec", "specs", "e2e"}
-UNIT = re.compile(r"\b(A\d+|BR-\d{3})\b")
-
+# the release these copies belong to; hook_gate.py refuses siblings of another release
+UPSPEC_VERSION = "1.8.1"
 
 def is_test_path(path):
-    parts = path.replace("\\", "/").split("/")
-    return bool(TEST_NAME.search(parts[-1])) or any(part in TEST_FOLDERS for part in parts[:-1])
+    return model.is_test_path(path)
 
 
 def pinning_test(seen):
@@ -91,31 +102,20 @@ def pinning_test(seen):
     return rest.split(" (")[0].strip()
 
 
-def test_file_exists(root, reference):
+def test_file_exists(root, reference, files=None):
     """A Seen in cell may name a test by its location (Login.test.tsx:230): accept it when that test file exists."""
     match = re.fullmatch(r"([\w./-]+?)(?::\d+)?", reference)
     if not match or not is_test_path(match.group(1)):
         return False
     tail = match.group(1).replace("\\", "/")
-    return any(path.replace(os.sep, "/").endswith(tail) for path in model.iter_source_files(root))
-
-
-def names_use_case(path, uc_id):
-    """True when the record's Element line or a row of its differences table names the use case."""
-    lines = model.read_lines(path)
-    if any(re.match(r"\**Element:?\**", line.strip()) and uc_id in line for line in lines):
-        return True
-    return any(mine for _, _, _, mine in (record_rows_from(lines, uc_id) or []) if mine is True)
+    return any(path.replace(os.sep, "/").endswith(tail)
+               for path in (model.iter_source_files(root) if files is None else files))
 
 
 def record_use_cases(path):
-    """Every use case a change record names in its Element line or its differences table."""
-    lines = model.read_lines(path)
-    ids = set()
-    for line in lines:
-        if re.match(r"\**Element:?\**", line.strip()):
-            ids.update(model.RE_UC_ID.findall(line))
-    for cell, _, _, _ in record_rows_from(lines, "") or []:
+    """Every use case a change record names in its element metadata or differences table."""
+    ids = set(model.RE_UC_ID.findall(model.parse_change_record(path).element))
+    for cell, _, _, _ in model.record_rows_from(model.read_lines(path), "") or []:
         ids.update(model.RE_UC_ID.findall(cell))
     return ids
 
@@ -189,7 +189,7 @@ def pin_text(name, read_files):
     return None
 
 
-def pin_untouched(repo, commit, name, test_root, docs_dir):
+def pin_untouched(repo, commit, name, test_root, docs_dir, view=None):
     """True when the pin reads now exactly as it did at the commit where it stood before the change."""
     def show(path):
         try:
@@ -215,9 +215,13 @@ def pin_untouched(repo, commit, name, test_root, docs_dir):
                     yield path, text
 
     def now():
-        for source in source_files(test_root, docs_dir, tests=True):
+        files = (view_sources(view, test_root, docs_dir, tests=True) if view is not None
+                 else source_files(test_root, docs_dir, tests=True))
+        for source in files:
             try:
-                yield os.path.relpath(source, repo), "\n".join(model.read_lines(source))
+                text = view.text(source) if view is not None else "\n".join(model.read_lines(source))
+                if text is not None:
+                    yield os.path.relpath(os.path.realpath(source), os.path.realpath(repo)), text
             except (OSError, UnicodeDecodeError):
                 continue
 
@@ -248,18 +252,30 @@ NOWHERE = re.compile(r"^(?:out of scope|open|none|-|—)\b", re.IGNORECASE)
 
 
 def guard_log(docs_dir):
-    """Unit -> verdict of its newest row in the guard-check log; empty when there is no log."""
-    path = os.path.join(docs_dir, "reviews", "guard-checks.md")
+    """Element -> its newest row in the guard-check log (spec_model.read_guard_log); empty when there is no log."""
     latest = {}
-    if os.path.isfile(path):
-        for table in model.read_tables(model.read_lines(path)):
-            if "Unit" not in table["header"] or "Verdict" not in table["header"]:
-                continue
-            for _, row, _ in table["rows"]:
-                unit = row.get("Unit", "").strip()
-                if unit:
-                    latest[unit] = row.get("Verdict", "").strip()
+    for row in model.read_guard_log(os.path.join(docs_dir, model.GUARD_LOG_NAME)):
+        if row.element:
+            latest[row.element] = row
     return latest
+
+
+def guard_staleness(row, uc, element, root):
+    """Why a logged result (a spec_model.GuardRow) no longer speaks for the element (a spec_model.Element) and its
+    file; None when it is current."""
+    if not row.current:
+        return "it was logged in the format before upspec 1.3.0, which holds no fingerprints"
+    text = element.text(uc)
+    if text is None or model.fingerprint(text) != row.element_fingerprint:
+        return "its text or its Examples table changed since it was logged"
+    try:
+        with open(os.path.join(root, row.file), "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return "%s no longer exists" % row.file
+    if model.fingerprint(data) != row.file_fingerprint:
+        return "%s changed since it was logged" % row.file
+    return None
 
 
 SOURCE = re.compile(r"^\s*(?:the\s+)?(?:(request)|(today)|decision\s+(\d+)|assumption\s+(\d+))\b", re.IGNORECASE)
@@ -292,7 +308,7 @@ def source_problems(lines, uc_id, units, rows):
             if uc_id not in cell and model.RE_UC_ID.search(cell):
                 continue
             match = SOURCE.match(source)
-            for unit in UNIT.findall(cell):
+            for unit in model.UNIT.findall(cell):
                 named.add(unit)
                 if not match:
                     problems.append("%s %s names a source that is not the request, today, a decision or an assumption: %s" % (uc_id, unit, source or "empty"))
@@ -329,7 +345,7 @@ def decision_problems(lines, docs):
                 continue
             for uc_id, part in refs:
                 if uc_id not in specs:
-                    path = uc_change_list.find_spec(docs, uc_id)
+                    path = model.find_use_case(docs, uc_id)
                     specs[uc_id] = model.parse_use_case(path) if path else None
                 spec = specs[uc_id]
                 if spec is None:
@@ -354,14 +370,9 @@ def element_exists(spec, part):
     return part.upper() in [f.label for f in spec.flows]
 
 
-def find_record(docs_dir, uc_id):
+def find_record(docs, uc_id):
     """The newest change record named after the use case or naming it; None when there is none."""
-    found = []
-    for path in glob.glob(os.path.join(docs_dir, "**", "change-records", "*.md"), recursive=True):
-        name = os.path.basename(path)
-        if name == uc_id + ".md" or name.startswith(uc_id + "-") or names_use_case(path, uc_id):
-            found.append(path)
-    return max(found, key=lambda path: (os.path.getmtime(path), path)) if found else None
+    return model.find_change_record(docs, uc_id)
 
 
 def record_rows(path, uc_id):
@@ -370,27 +381,7 @@ def record_rows(path, uc_id):
     mine is True when the row names this use case, None when it names none (it belongs to the
     change as a whole), False when it names only another use case.
     """
-    return record_rows_from(model.read_lines(path), uc_id)
-
-
-def record_rows_from(lines, uc_id):
-    for table in model.read_tables(lines):
-        header = [h.strip().lower() for h in table["header"]]
-        if "element" not in header or not any(h.startswith("today") for h in header):
-            continue
-        element_col = table["header"][header.index("element")]
-        seen_col = next((table["header"][i] for i, h in enumerate(header) if h.startswith("seen")), None)
-        rows = []
-        for _, row, _ in table["rows"]:
-            cell = row.get(element_col, "").strip()
-            if not cell or cell.startswith("["):
-                continue
-            other = [u for u in model.RE_UC_ID.findall(cell) if u != uc_id]
-            mine = True if uc_id in cell else (False if other else None)
-            units = [] if mine is False else UNIT.findall(cell)
-            rows.append((cell, units, row.get(seen_col, "").strip() if seen_col else None, mine))
-        return rows
-    return None
+    return model.record_rows_from(model.read_lines(path), uc_id)
 
 
 def units_in_change(uc, repo, rel, record):
@@ -405,7 +396,7 @@ def units_in_change(uc, repo, rel, record):
         old = uc_change_list.revision_text(repo, base, rel) if base else None
         if old is not None:
             changes = uc_change_list.compare(model.parse_use_case_lines(old.split("\n"), rel), uc)
-            units = sorted({c["element"] for c in changes if c["change"] in ("added", "changed") and UNIT.fullmatch(c["element"])})
+            units = sorted({c["element"] for c in changes if c["change"] in ("added", "changed") and model.UNIT.fullmatch(c["element"])})
             return units, "the specification's changes since %s" % base[:12]
     units = [f.label for f in uc.flows if not f.retired] + [r.id for r in uc.rules if not r.retired]
     return units, "the whole use case (no change record, no implemented revision)"
@@ -421,47 +412,194 @@ def source_files(root, docs_dir, tests):
             yield path
 
 
+def view_sources(view, root, docs_dir, tests, paths=None):
+    """Narrow shared candidates by folder and kind without opening another view."""
+    root_abs, docs_abs = os.path.realpath(root), os.path.realpath(docs_dir)
+    for path in sorted(view.files() if paths is None else paths):
+        full = os.path.realpath(path)
+        if not full.startswith(root_abs + os.sep) or full.startswith(docs_abs + os.sep):
+            continue
+        if is_test_path(os.path.relpath(full, root_abs)) == tests:
+            yield path
+
+
+def section_view(view, root):
+    """Reuse the view only when git can list the searched folder in its repository."""
+    if view is None:
+        return None
+    if os.path.realpath(root) == os.path.realpath(view.root):
+        return view
+    code, top = model.git(["rev-parse", "--show-toplevel"], cwd=root)
+    return view if code == 0 and os.path.realpath(top.strip()) == os.path.realpath(view.root) else None
+
+
 def tracking_warning(repo, base, rel, uc):
     """P6 of the pairing: a Status move without ABILITIES.md or ACTIVE.md in step, as text; None when it does not apply."""
-    if not repo or not rel or not model.a_files_present(repo):
+    tracking = model.read_tracking(repo) if repo and rel else None
+    if tracking is None:
         return None
     code, before = model.git(["show", "%s:%s" % (base, rel)], cwd=repo)
     if code != 0:
         return None          # the specification is new since the base: its first Status is no move
-    match = re.search(r"(?m)^\*\*Status:\*\*\s*(\w+)", before)
-    if not match or match.group(1) == uc.status:
+    previous = model.parse_use_case_lines(before.split("\n"), rel).status
+    if not previous or previous == uc.status:
         return None
     code, out = model.git(["diff", "--name-only", base, "--", "ABILITIES.md", "ACTIVE.md"], cwd=repo)
     if code == 0 and out.strip():
         return None
+    if not tracking["abilities_present"]:                          # the small setup: nothing about abilities
+        return ("%s moved from %s to %s and ACTIVE.md did not change: update the current work in the same commit"
+                % (uc.id, previous, uc.status))
     return ("%s moved from %s to %s and neither ABILITIES.md nor ACTIVE.md changed: update the ability whose Specs line "
-            "names it, and the current work, in the same commit" % (uc.id, match.group(1), uc.status))
+            "names it, and the current work, in the same commit" % (uc.id, previous, uc.status))
 
 
-def check(args):
+def untested_units(args, view, uc) -> list[str]:
+    """Every active flow and rule not named by a test outside the docs folder."""
+    test_root = args.tests or (view.root if view is not None else None) or "."
+    test_view = section_view(view, test_root)
+    if test_view is not None:
+        candidates = model._marker_paths(test_view.root, {uc.id})
+        files = view_sources(test_view, test_root, args.docs, tests=True, paths=candidates)
+        patterns = model._marker_patterns(uc.id)
+
+        def tests_with_id():
+            for path in files:
+                text = test_view.text(path)
+                if text is not None and any(pattern.search(text) for pattern in patterns):
+                    yield path, text.split("\n")
+
+        named = set(model.scan_unit_lines(uc, tests_with_id()))
+    else:
+        _, hits = model.scan_units(test_root, uc)
+        named = {label for label, places in hits.items()
+                 if any(is_test_path(os.path.relpath(p, test_root)) and
+                        not os.path.abspath(p).startswith(os.path.abspath(args.docs) + os.sep)
+                        for p, _, _ in places)}
+    return [u for u in whole_units(uc) if u not in named]
+
+
+def working_tree_paths(repo):
+    """Staged, unstaged and untracked paths, without rebuilding the evidence view."""
+    code, changed = model.git(["diff", "--name-only", "-z", "HEAD", "--"], cwd=repo)
+    if code:
+        _, changed = model.git(["ls-files", "-z", "--cached"], cwd=repo)
+    _, untracked = model.git(["ls-files", "-z", "--others", "--exclude-standard"], cwd=repo)
+    return {path for path in (changed + "\0" + untracked).split("\0") if path}
+
+
+def whole_units(uc):
+    return [f.label for f in uc.flows if not f.retired] + [r.id for r in uc.rules if not r.retired]
+
+
+def open_records(view, uc_id):
+    """Changed, present change records whose metadata, rows or file name name the use case."""
+    return [os.path.join(view.root, path) for path, status in sorted(view.changed.items())
+            if status != "D" and view.kind(path) == "change_record" and
+            os.path.isfile(os.path.join(view.root, path)) and
+            (uc_id in model.ids_named_by_path(os.path.basename(path)) or
+             uc_id in record_use_cases(os.path.join(view.root, path)))]
+
+
+def check(args, view: change_view.ChangeView | None = None) -> dict:
+    """Check a change, checking every open record separately for a claim."""
+    if not getattr(args, "claim", False):
+        return _check_one(args, view)
+    if view is None:
+        code, top = model.git(["rev-parse", "--show-toplevel"], cwd=os.path.abspath(args.docs))
+        if code == 0:
+            repo = top.strip()
+            docs_rel = os.path.relpath(os.path.realpath(args.docs), os.path.realpath(repo)).replace(os.sep, "/")
+            try:
+                view = change_view.view_for(repo, args.base, docs_rel)
+            except change_view.BaseError as exc:
+                raise SystemExit(str(exc))
+    records = open_records(view, args.use_case) if view is not None else []
+    covered = {args.use_case}
+    for record in records:
+        covered.update(record_use_cases(record))
+        covered.update(model.ids_named_by_path(os.path.basename(record)))
+    reports = []
+    for record in records or [None]:
+        selected = copy.copy(args)
+        selected.record = record
+        reports.append(_check_one(selected, view, covered=covered))
+    result = reports[0]
+    if len(reports) > 1:
+        # Preserve each record's evidence, while readiness requires all reports to pass.
+        result = dict(result, records=reports)
+        for field in ("problems", "warnings", "units"):
+            result[field] = list(dict.fromkeys(item for report in reports for item in report[field]))
+        result["units_from"] = "all open change records: " + ", ".join(records)
+    return result
+
+
+def _check_one(args, view: change_view.ChangeView | None = None, covered=None) -> dict:
     problems, result = [], {}
     docs = model.Docs(args.docs)
-    path = uc_change_list.find_spec(docs, args.use_case)
+    path = getattr(args, "spec_path", None) or model.find_use_case(docs, args.use_case)
     if not path:
         raise SystemExit("no specification file for %s under %s" % (args.use_case, args.docs))
     uc = model.parse_use_case(path)
     code, top = model.git(["rev-parse", "--show-toplevel"], cwd=os.path.dirname(os.path.abspath(path)))
     repo = top.strip() if code == 0 else None
     rel = os.path.relpath(os.path.realpath(path), os.path.realpath(repo)).replace(os.sep, "/") if repo else None
-    record = args.record or find_record(args.docs, uc.id)
-    units, origin = units_in_change(uc, repo, rel, record)
+    record = args.record if getattr(args, "claim", False) else args.record or find_record(docs, uc.id)
+    record = os.path.abspath(record) if record else None
+    formats = []
+    if record:
+        record_docs = model.Docs(args.docs)
+        record_docs.change_record_files = lambda: [record]
+        formats = model.format_findings(record_docs, kinds=("record",))
+        problems += ["record format %s: %s" % (code, message) for _, _, code, message in formats]
+    result["formats"] = formats
+    if getattr(args, "claim", False) and not record:
+        units, origin = whole_units(uc), "the whole use case (Status claim without an open change record)"
+    else:
+        units, origin = units_in_change(uc, repo, rel, record)
     result.update({"use_case": uc.id, "units": units, "units_from": origin, "record": os.path.relpath(record) if record else None})
 
     docs_rel = os.path.relpath(os.path.realpath(args.docs), os.path.realpath(repo)).replace(os.sep, "/") if repo else None
+    if view is None and repo:
+        try:
+            view = change_view.view_for(repo, args.base, docs_rel)
+        except change_view.BaseError:
+            raise SystemExit("unknown revision: %s; pass the branch or commit the change started from, or HEAD while nothing is committed" % args.base)
+    base = view.base.commit if view is not None else args.base
+
+    # With no integration base, committed pins and tracking still compare against HEAD.
+    pin_base = base
+    if repo and not pin_base:
+        code, head = model.git(["rev-parse", "--verify", "HEAD"], cwd=repo)
+        pin_base = head.strip() if code == 0 else None
 
     # guard checks
-    log = guard_log(args.docs)
-    guard = {"checked": [u for u in units if u.startswith("BR-")], "caught": [], "missing": []}
+    # The newest row per element counts, and only when it is caught and logged against the element and the
+    # enforcing file as they are now.
+    try:
+        log = guard_log(args.docs)
+    except (OSError, UnicodeDecodeError) as exc:
+        log = {}
+        problems.append("%s:0: ERROR UNREADABLE: cannot read the guard-check log: %s"
+                        % (os.path.relpath(os.path.join(args.docs, model.GUARD_LOG_NAME)), exc))
+    guard = {"checked": [u for u in units if u.startswith("BR-")], "caught": [], "missing": [], "stale": []}
+    log_root = model.project_root(args.docs)
     for rule in guard["checked"]:
-        verdict = log.get("%s %s" % (uc.id, rule), "")
-        (guard["caught"] if verdict == "caught" else guard["missing"]).append(rule if not verdict else "%s (%s)" % (rule, verdict))
+        element = model.Element(uc.id, "BR-", int(rule[len("BR-"):]))
+        row = log.get(str(element))
+        if row is None:
+            guard["missing"].append(rule)
+        elif row.verdict != "caught":
+            guard["missing"].append("%s (%s)" % (rule, row.verdict))
+        else:
+            reason = guard_staleness(row, uc, element, log_root)
+            if reason:
+                guard["stale"].append("%s (%s)" % (rule, reason))
+            else:
+                guard["caught"].append(rule)
     result["guard"] = guard
     problems += ["no logged break of %s %s that a test caught: run scripts/guard_check.py" % (uc.id, m) for m in guard["missing"]]
+    problems += ["the guard check of %s %s is stale: run scripts/guard_check.py again" % (uc.id, s) for s in guard["stale"]]
 
     # sources of the flows and rules in the change
     record_lines = model.read_lines(record) if record else []
@@ -493,31 +631,42 @@ def check(args):
         result["scope"] = "not run: git is not available here"
         problems.append("the scope audit could not run (no git); compare the changed files with the plan by hand and say so")
     else:
-        files = scope_audit.changed_files(repo, args.base)
-        if files is None:
-            raise SystemExit("unknown revision: %s; pass the branch or commit the change started from, or HEAD while nothing is committed" % args.base)
-        ids = sorted({uc.id} | (record_use_cases(record) if record else set()))
-        alternatives = "|".join(re.escape(i) for i in ids)
-        compacts = "|".join(re.escape(model.compact_id(i)) for i in ids)
-        plain = re.compile(r"(?<![A-Za-z0-9])(?:%s)(?!\d)" % alternatives)
-        compact = re.compile(r"(?<![A-Za-z0-9])(?:%s)(?!\d)" % compacts)
-        unattributed = [p for p, status in sorted(files.items())
-                        if not p.startswith(docs_rel + "/") and not plain.search(p) and not compact.search(p)
-                        and not (status != "D" and scope_audit.carries(os.path.join(repo, p), (plain, compact)))]
-        result["scope"] = {"changed": len(files), "unattributed": unattributed, "use_cases": ids}
-        problems += ["%s changed but carries no %s: explain it, split it out or revert it" % (p, " or ".join(ids)) for p in unattributed]
+        ids = sorted({uc.id} | set(covered or ()) |
+                     (record_use_cases(record) | model.ids_named_by_path(os.path.basename(record)) if record else set()))
+        groups = scope_audit.attribute(view, set(ids), record)
+        unattributed = [entry["path"] for entry in groups["unattributed"]]
+        result["scope"] = {"changed": len(view.changed), "unattributed": unattributed, "use_cases": ids}
+        result["warnings"] = ["%s changed, not part of this change" % p for p in unattributed]
+        spill = getattr(args, "spill", None)
+        if spill is None:
+            spill = working_tree_paths(repo)
+        for path in sorted(spill):
+            outside = model.ids_named_by_path(path) - set(ids)
+            if outside:
+                problems.append("%s changed in this session and names %s, which this change does not cover: "
+                                "undo it or name the use case in the change record" % (path, ", ".join(sorted(outside))))
 
     # markers
-    code_root = args.code or repo or "."
+    code_root = args.code or (view.root if view is not None else repo) or "."
+    code_view = section_view(view, code_root)
     rules = [u for u in units if u.startswith("BR-")]
     marker = {rule: re.compile(r"(?<![A-Za-z0-9])%s\s+%s(?!\d)" % (re.escape(uc.id), rule)) for rule in rules}
     found, texts, defined = set(), [], []
-    for source in source_files(code_root, args.docs, tests=False):
+    marked = code_view.markers({uc.id}) if rules and code_view is not None else None
+    sources = ()
+    if rules:
+        sources = (view_sources(code_view, code_root, args.docs, tests=False, paths=marked) if code_view is not None
+                   else source_files(code_root, args.docs, tests=False))
+    for source in sources:
         try:
-            lines = model.read_lines(source)
+            text = code_view.text(source) if code_view is not None else "\n".join(model.read_lines(source))
+            if text is None or "\0" in text:
+                continue
+            lines = text.split("\n")
         except (OSError, UnicodeDecodeError):
             continue
-        texts.append("\n".join(lines))
+        if code_view is None:
+            texts.append(text)
         for index, line in enumerate(lines):
             for rule, pattern in marker.items():
                 if pattern.search(line):
@@ -526,18 +675,22 @@ def check(args):
                     if name:
                         defined.append((rule, os.path.relpath(source), index + 1, name))
     missing_markers = [r for r in rules if r not in found]
+    names = {name for _, _, _, name in defined}
+    references = code_view.references_many(names) if code_view is not None else {}
+    counts = {name: model.count_references(name, [code_view.text(path) for path in references[name]]
+                                          if code_view is not None else texts) for name in names}
     # A warning, not a problem: the definition may be called by a framework that never names it.
     uncalled = ["%s at %s:%d marks %s(), which no other code refers to" % (rule, path, line, name)
-                for rule, path, line, name in defined if model.count_references(name, texts) <= 1]
+                for rule, path, line, name in defined
+                if counts[name] <= 1]
     result["markers"] = {"checked": rules, "missing": missing_markers, "uncalled": uncalled}
     problems += ["no code carries the marker %s %s" % (uc.id, r) for r in missing_markers]
 
     # tests
-    test_root = args.tests or repo or "."
-    files, hits = model.scan_units(test_root, uc)
-    named = {label for label, places in hits.items()
-             if any(is_test_path(os.path.relpath(p, test_root)) and not os.path.abspath(p).startswith(os.path.abspath(args.docs) + os.sep) for p, _, _ in places)}
-    untested = [u for u in units if u not in named]
+    test_root = args.tests or (view.root if view is not None else repo) or "."
+    test_view = section_view(view, test_root)
+    missing_tests = set(untested_units(args, view, uc))
+    untested = [u for u in units if u in missing_tests or u not in whole_units(uc)]
     result["tests"] = {"checked": units, "missing": untested}
     problems += ["no test of %s names %s" % (uc.id, u) for u in untested]
 
@@ -547,9 +700,13 @@ def check(args):
     altered = altered_cells(record_lines, uc.id) if record else set()
     if rows is not None:
         test_text = []
-        for source in source_files(test_root, args.docs, tests=True):
+        pin_files = list(view_sources(test_view, test_root, args.docs, tests=True) if test_view is not None
+                         else source_files(test_root, args.docs, tests=True))
+        for source in pin_files:
             try:
-                test_text.append("\n".join(model.read_lines(source)))
+                text = test_view.text(source) if test_view is not None else "\n".join(model.read_lines(source))
+                if text is not None:
+                    test_text.append(text)
             except (OSError, UnicodeDecodeError):
                 continue
         test_text = "\n".join(test_text)
@@ -567,15 +724,15 @@ def check(args):
             if not (how.startswith("test") and name):
                 pin["unpinned"].append("%s: read from the code, not pinned by a test" % cell)
                 continue
-            point = pin_point(repo, args.base, name, docs_rel) if repo else None
+            point = pin_point(repo, pin_base, name, docs_rel) if repo and pin_base else None
             if point:
                 # Pinned before the change. A row the change alters needs that pin updated or replaced.
-                if cell in altered and pin_untouched(repo, point, name, test_root, args.docs):
+                if cell in altered and pin_untouched(repo, point, name, test_root, args.docs, test_view):
                     pin["untouched"].append("%s: the change alters this row but leaves %s exactly as it was, so that test does not "
                                             "pin what changes; pin the row with a test that asserts its Today cell, then update "
                                             "or replace that test with the change" % (cell, name))
                 continue
-            if name in test_text or test_file_exists(test_root, name):
+            if name in test_text or test_file_exists(test_root, name, pin_files):
                 if repo:
                     pin["unpinned"].append("%s: the test %s was written with the change, not before it; pin against today's code, "
                                            "commit the pin, then change the code" % (cell, name))
@@ -584,53 +741,76 @@ def check(args):
     result["pinning"] = pin
     problems += ["pin today's behavior before changing it: %s" % item for item in pin["unpinned"]]
     problems += ["a pin the change did not touch: %s" % item for item in pin["untouched"]]
-    result["tracking"] = tracking_warning(repo, args.base, rel, uc)
+    result["tracking"] = tracking_warning(repo, pin_base, rel, uc) if pin_base else None
+    result.setdefault("warnings", [])
+    result["warnings"] = list(dict.fromkeys(result["warnings"] + uncalled + ([result["tracking"]] if result["tracking"] else [])))
     result["problems"] = problems
     return result
 
 
+def guard_summary(guard):
+    """The report's Guard check line: caught, or what is missing and what is stale."""
+    missing, stale = guard.get("missing", []), guard.get("stale", [])
+    if not guard.get("checked"):
+        return "no rule in the change"
+    if not missing and not stale:
+        return "logged and caught: %s" % ", ".join(guard.get("caught", []))
+    parts = []
+    if missing:
+        parts.append("missing for %s (run scripts/guard_check.py)" % ", ".join(missing))
+    if stale:
+        parts.append("stale for %s (run scripts/guard_check.py again)" % ", ".join(stale))
+    return "; ".join(parts)
+
+
 def print_text(r, base):
-    print("%s  finish check against %s" % (r["use_case"], base))
-    print("Units in the change (from %s): %s" % (r["units_from"], ", ".join(r["units"]) or "none"))
+    """Build the text report, including the final newline the CLI prints."""
+    lines = []
+    for path, line, code, message in r.get("formats", []):
+        lines.append("%s:%d: ERROR %s [-]: %s" % (path, line, code, message))
+    lines.append("%s  finish check against %s" % (r["use_case"], base))
+    lines.append("Units in the change (from %s): %s" % (r["units_from"], ", ".join(r["units"]) or "none"))
     scope = r["scope"]
     if isinstance(scope, str):
-        print("Scope audit:  %s" % scope)
+        lines.append("Scope audit:  %s" % scope)
     else:
-        print("Scope audit:  %s" % ("ok: %d changed file(s), all attributed" % scope["changed"] if not scope["unattributed"]
+        lines.append("Scope audit:  %s" % ("ok: %d changed file(s), all attributed" % scope["changed"] if not scope["unattributed"]
                                     else "%d unattributed: %s" % (len(scope["unattributed"]), ", ".join(scope["unattributed"]))))
+    for warning in r.get("warnings", []):
+        if warning not in r["markers"].get("uncalled", []) and warning != r.get("tracking"):
+            lines.append("  warning:    %s" % warning)
     m = r["markers"]
-    print("Markers:      %s" % ("ok: %s" % (", ".join(m["checked"]) or "no rule in the change") if not m["missing"] else "missing: %s" % ", ".join(m["missing"])))
+    lines.append("Markers:      %s" % ("ok: %s" % (", ".join(m["checked"]) or "no rule in the change") if not m["missing"] else "missing: %s" % ", ".join(m["missing"])))
     for warning in m.get("uncalled", []):
-        print("  warning:    %s; the rule is enforced where it is called" % warning)
-    print("Sources:      %s" % ("ok" if not r.get("sources") else "%d flows or rules rest on no source" % len(r["sources"])))
+        lines.append("  warning:    %s; the rule is enforced where it is called" % warning)
+    lines.append("Sources:      %s" % ("ok" if not r.get("sources") else "%d flows or rules rest on no source" % len(r["sources"])))
     d = r.get("decisions", [])
-    print("Decisions:    %s" % ("ok" if not d else "%d without a home in the specifications" % len(d)))
+    lines.append("Decisions:    %s" % ("ok" if not d else "%d without a home in the specifications" % len(d)))
     s = r.get("specification", "not checked")
-    print("Record:       %s" % (s if isinstance(s, str) else "ok: every changed flow and rule is named" if not s["unrecorded"]
+    lines.append("Record:       %s" % (s if isinstance(s, str) else "ok: every changed flow and rule is named" if not s["unrecorded"]
                                 else "changed outside the record: %s" % ", ".join(c["unit"] for c in s["unrecorded"])))
     t = r["tests"]
-    print("Tests named:  %s" % ("ok: %s" % (", ".join(t["checked"]) or "nothing to name") if not t["missing"] else "no test names %s" % ", ".join(t["missing"])))
+    lines.append("Tests named:  %s" % ("ok: %s" % (", ".join(t["checked"]) or "nothing to name") if not t["missing"] else "no test names %s" % ", ".join(t["missing"])))
     p = r["pinning"]
     if r["record"] is None:
-        print("Pinning:      no change record")
+        lines.append("Pinning:      no change record")
     else:
         issues = p["unpinned"] + p.get("untouched", [])
-        print("Pinning:      %s" % ("ok: %d row(s)" % p["rows"] if not issues else "%d of %d row(s) not pinned (see below)" % (len(issues), p["rows"])))
-    g = r.get("guard", {"checked": [], "missing": [], "caught": []})
-    print("Guard check:  %s" % ("logged and caught: %s" % ", ".join(g["caught"]) if g["checked"] and not g["missing"]
-                                  else "missing for %s (run scripts/guard_check.py)" % ", ".join(g["missing"]) if g["missing"]
-                                  else "no rule in the change"))
+        lines.append("Pinning:      %s" % ("ok: %d row(s)" % p["rows"] if not issues else "%d of %d row(s) not pinned (see below)" % (len(issues), p["rows"])))
+    lines.append("Guard check:  %s" % guard_summary(r.get("guard", {})))
     if r.get("tracking"):
-        print("Tracking:     warning: %s" % r["tracking"])
-    print("To fill in by hand:")
-    print("  Tests run:    <the suite's result before and after the change>")
-    print("  Inventions:   <asked / assumed / declared free>")
+        lines.append("Tracking:     warning: %s" % r["tracking"])
+    lines.append("To fill in by hand:")
+    lines.append("  Tests run:    <the suite's result before and after the change>")
+    lines.append("  Inventions:   <asked / assumed / declared free>")
     if r["problems"]:
-        print("Result: not ready, %d problem(s)" % len(r["problems"]))
+        lines.append("Result: not ready, %d problem(s)" % len(r["problems"]))
         for problem in r["problems"]:
-            print("  - %s" % problem)
+            lines.append("  - %s" % problem)
     else:
-        print("Result: ready to report")
+        lines.append("Result: ready to report")
+
+    return "\n".join(lines) + "\n"
 
 
 def main(argv):
@@ -640,33 +820,62 @@ def main(argv):
     parser.add_argument("--docs", help="the specification folder (default: the one the rules block records, else docs)")
     parser.add_argument("--code", help="folder with the implementation (default: the repository)")
     parser.add_argument("--tests", help="folder with the tests (default: the repository)")
+    parser.add_argument("--claim", action="store_true", help="check the whole use case unless open change records cover it")
     parser.add_argument("--record", help="change record with the differences from today")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--strict", action="store_true", help="exit 1 when it finds problems (default: exit 0, the findings are reported)")
     args = parser.parse_args(argv)
+    code, text, to_stderr, notes = _finish_report(args)
+    # A note names a folder the search for change records could not look into; it changes nothing of the result.
+    sys.stderr.write(notes)
+    (sys.stderr if to_stderr else sys.stdout).write(text)
+    # A report that is not ready, or a file it could not read, is the output; only a strict run turns it into a failure.
+    return 0 if code == 1 and not args.strict else code
+
+
+def finish_report(args, view: change_view.ChangeView | None = None) -> tuple[int, str]:
+    """Return the CLI exit code and complete report without writing to a stream."""
+    return _finish_report(args, view)[:2]
+
+
+def _finish_report(args, view=None):
+    """Build a report and its destination for the command-line wrapper, and the notes it gives beside it (the folders
+    the search for change records could not look into, which stop nothing)."""
+    notes = ""
+
+    def error(code, text):
+        return code, text, True, notes
+
     args.docs = args.docs or model.docs_default()
     if not re.fullmatch(r"UC-\d{3}", args.use_case):
-        print("use case identifier must look like UC-012", file=sys.stderr)
-        return 2
+        return error(2, "use case identifier must look like UC-012\n")
     for folder in (args.docs, args.code, args.tests):
-        if folder and not os.path.isdir(folder):
-            print("no such folder: %s" % folder, file=sys.stderr)
-            return 2
-    if args.record and not os.path.isfile(args.record):
-        print("no such file: %s" % args.record, file=sys.stderr)
-        return 2
+        # A broken link in place of the specification folder goes on to the old-format check, which reports it.
+        if folder and not os.path.isdir(folder) and not (folder == args.docs and model.folder_present(folder)):
+            return error(2, model.no_such("folder", folder) + "\n")
+    # A record there as a link that cannot be resolved is not missing: the old-format check names it as UNREADABLE.
+    if args.record and (os.path.isdir(args.record) or model.absent(args.record)):
+        return error(2, "no such file: %s\n" % args.record)
+    docs = model.Docs(args.docs)
+    if args.record:
+        records = docs.change_record_files()
+        docs.change_record_files = lambda: sorted(set(records + [args.record]))
+    notice = io.StringIO()
+    # The library's result is 1 on any problem, an unreadable file included; main applies --strict to it.
+    stop = model.stop_if_old(docs, stream=notice, strict=True)
+    if stop is not None:
+        return error(stop, notice.getvalue())
+    notes = notice.getvalue()
     try:
-        result = check(args)
+        result = check(args, view)
     except SystemExit as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
+        return error(2, str(exc) + "\n")
     except (OSError, UnicodeDecodeError) as exc:
-        print("cannot read: %s" % exc, file=sys.stderr)
-        return 2
-    if args.format == "json":
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-    else:
-        print_text(result, args.base)
-    return 1 if result["problems"] else 0
+        return error(1, "%s:0: ERROR UNREADABLE: cannot read: %s\n" % (args.record or args.docs, exc))
+    base = (view.base.ref or view.base.commit or "none") if view is not None else args.base
+    text = (model.data_text(result, getattr(sys.stdout, "encoding", None)) + "\n" if args.format == "json"
+            else print_text(result, base))
+    return (1 if result["problems"] else 0), text, False, notes
 
 
 if __name__ == "__main__":

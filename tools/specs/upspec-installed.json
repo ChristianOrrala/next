@@ -1,0 +1,50 @@
+{
+  "scripts": {
+    "change_view.py": {
+      "baseline": "8cda3331c4f5fb2672dcda4072af1e4a59d47c113af77c584d4c5d36f89de577"
+    },
+    "finish_change.py": {
+      "baseline": "20c87656a74dd52c82878cd0920a1f286569b66d4c0ed0b772aa9299050ea21b"
+    },
+    "hook_gate.py": {
+      "baseline": "ba2a258092b17d2ddc33b453a5b464deb1f4a13eda702c7f977bbf25c328e8e1"
+    },
+    "hook_profiles.py": {
+      "baseline": "f5e2aaf43e22ef5c5615568259e0fdabbd31e83629ca6a347eedeac2870d4654"
+    },
+    "scope_audit.py": {
+      "baseline": "eb710c7d957177259744ce2e923f970288bbb41225c327ad0a65254cfe1f26c7"
+    },
+    "spec_data.py": {
+      "baseline": "74f202589fa601a27b8a0520da78f4897c3aac73c02c8c46f1b9d707baa37662"
+    },
+    "spec_first_guard.py": {
+      "baseline": "0a93efbb417199b774cd604b2792d9b644f6b4ebbf5d6ebfc4c29e38f2272571"
+    },
+    "spec_lint.py": {
+      "baseline": "62c8bae72b7578534f48145371cf4cdbfd4834651e30343088615af04dfa7e1f"
+    },
+    "spec_model.py": {
+      "baseline": "b7033df0db4724d451606b7969cfa05fe1e4882adf371d3eb6bcd3099634c556"
+    },
+    "status_claims.py": {
+      "baseline": "2d86e1c431556311e9e512d96208457c55bf27e8f82997e8f35b172bafbcc47a"
+    },
+    "uc_change_list.py": {
+      "baseline": "45446f6d13f8a9aecf5bbff64e09715152b090b5288bf052ce202970902f0749"
+    },
+    "unrecorded_changes.py": {
+      "baseline": "46f5aac187044e6f3119838d3e3ba247ad297c5c65755e0a2ce7a3903a54a2af"
+    },
+    "use_case_map.py": {
+      "baseline": "29d9be32c3bc1d8d032095a540a162ed200dc6b4cfbd7f5387d9ae872a9f9802"
+    },
+    "validate_use_case.py": {
+      "baseline": "38b31dcc9d9a2381f65cc22d04b49ccc9ad65ac4f1cafec74828745416d795ec"
+    },
+    "workflow_state.py": {
+      "baseline": "4fc142d6b46df7bfa183f159392eba892459d1eda6cd458aa650637b72e574b5"
+    }
+  },
+  "version": "1.8.1"
+}
