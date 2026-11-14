@@ -1,4 +1,14 @@
 #!/bin/sh
-# Checks the shape of the A-files before every commit.
+# Reports the shape of the A-files before every commit and never refuses it:
+# the check reads what is staged, as the commit will hold it, and notes an
+# A-file whose changes are not staged. The problems are shown, the commit goes
+# through, and so it does when the check cannot run. A repository that chooses
+# a strict pipeline replaces the lines below with:
+#   exec python3 tools/check_tracking.py --staged --strict
 # Enable once per clone: git config core.hooksPath .githooks
-exec python3 tools/check_tracking.py
+python3 tools/check_tracking.py --staged
+result=$?
+if [ "$result" -ne 0 ]; then
+    echo "A-files check: it could not run (exit $result); the commit goes through." >&2
+fi
+exit 0

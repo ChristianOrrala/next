@@ -15,7 +15,7 @@
 
 ## Pending
 
-- [ ] Prove the agent hooks in a new session and add the `**Hooks:**` line to `AGENTS.md` (the specification check has not yet been seen blocking)
+- [ ] Prove the agent hooks (upspec 1.8.1 wiring, now with turn-start) in a new session and add the `**Hooks:**` line to `AGENTS.md`; the proof steps are in the hooks reference of `up-bootstrapping-spec-driven-projects`
 
 ## Debt
 
