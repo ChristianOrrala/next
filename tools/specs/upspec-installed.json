@@ -1,52 +1,52 @@
 {
   "scripts": {
     "change_view.py": {
-      "baseline": "8cda3331c4f5fb2672dcda4072af1e4a59d47c113af77c584d4c5d36f89de577"
+      "baseline": "413eabfb23a19cd7b075d4c82cb0b14e56c361ca18ce28d297d43a9b222daa26"
     },
     "finish_change.py": {
-      "baseline": "20c87656a74dd52c82878cd0920a1f286569b66d4c0ed0b772aa9299050ea21b"
+      "baseline": "18164faaaa96a7bb93440b1b3b79029dadd5a033af749081a4062301dfb65b91"
     },
     "hook_gate.py": {
-      "baseline": "ba2a258092b17d2ddc33b453a5b464deb1f4a13eda702c7f977bbf25c328e8e1"
+      "baseline": "bc290e300dee99e3d7a992db8b9bb1790c8fa720f548db14804a57f4534f3e6f"
     },
     "hook_profiles.py": {
-      "baseline": "f5e2aaf43e22ef5c5615568259e0fdabbd31e83629ca6a347eedeac2870d4654"
+      "baseline": "ea92b5b7688173d7f76c0aec10225ff3bad0d568a1bab7bc3ac45c14f5e54b49"
     },
     "scope_audit.py": {
-      "baseline": "eb710c7d957177259744ce2e923f970288bbb41225c327ad0a65254cfe1f26c7"
+      "baseline": "05342c4826ca54910ce32c44e6600674cb70166958478338b3028fc6d1cef10d"
     },
     "spec_data.py": {
-      "baseline": "74f202589fa601a27b8a0520da78f4897c3aac73c02c8c46f1b9d707baa37662"
+      "baseline": "b0ec4c048b20d9b22d4177a6b4a58af464b9dfe9e1592cad685e89b12c9caf25"
     },
     "spec_first_guard.py": {
-      "baseline": "0a93efbb417199b774cd604b2792d9b644f6b4ebbf5d6ebfc4c29e38f2272571"
+      "baseline": "975549545d8d7b44e79c116f30cdc53f61139405640b81ed4bbc0d52604ea24e"
     },
     "spec_lint.py": {
-      "baseline": "62c8bae72b7578534f48145371cf4cdbfd4834651e30343088615af04dfa7e1f"
+      "baseline": "831118217ff698c2f80f07395a2c9050a086d7cae1f7f7dae01064708b0065e7"
     },
     "spec_model.py": {
-      "baseline": "b7033df0db4724d451606b7969cfa05fe1e4882adf371d3eb6bcd3099634c556"
+      "baseline": "1b2a1852263cfc409dca39c422ddca9014fbb2ebbcebef7cd5764f483af36294"
     },
     "status_claims.py": {
-      "baseline": "2d86e1c431556311e9e512d96208457c55bf27e8f82997e8f35b172bafbcc47a"
+      "baseline": "00dc2a974347e43597e5ffcd620cf91ce533081db66f870667315b68f139cb19"
     },
     "uc_change_list.py": {
-      "baseline": "45446f6d13f8a9aecf5bbff64e09715152b090b5288bf052ce202970902f0749"
+      "baseline": "b98bfc7dfae634acb61c00b0f860cda59a538ad430896820ac5cdd49c4185bc8"
     },
     "unrecorded_changes.py": {
-      "baseline": "46f5aac187044e6f3119838d3e3ba247ad297c5c65755e0a2ce7a3903a54a2af"
+      "baseline": "bb9eab8aef39bd943722641e39fd80a9b9db0a497bca3b23d4e4282a70c7fb9a"
     },
     "use_case_map.py": {
-      "baseline": "29d9be32c3bc1d8d032095a540a162ed200dc6b4cfbd7f5387d9ae872a9f9802"
+      "baseline": "f82944dfb55381cd0b9a42666c65fc200c6074231617af3e9894c86106f62f59"
     },
     "validate_use_case.py": {
-      "baseline": "38b31dcc9d9a2381f65cc22d04b49ccc9ad65ac4f1cafec74828745416d795ec"
+      "baseline": "801b2cf37a45b4b4dc43890e84e94185b1daf7e6db946de4762320493d1c5976"
     },
     "workflow_state.py": {
-      "baseline": "4fc142d6b46df7bfa183f159392eba892459d1eda6cd458aa650637b72e574b5"
+      "baseline": "1da10d8c078f453a1e88aa8f03d552ca399ddeafe9fd8d152082b1d3e3efda79"
     }
   },
-  "version": "1.8.1",
+  "version": "1.8.2",
   "wiring": {
     "claude": {
       "adapted": [],
