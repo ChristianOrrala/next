@@ -1,79 +1,41 @@
 {
   "scripts": {
     "change_view.py": {
-      "baseline": "413eabfb23a19cd7b075d4c82cb0b14e56c361ca18ce28d297d43a9b222daa26"
+      "baseline": "f9c92f571e09b74f040c248d52365cbc88f342864e09dddb6f945678978a8e87"
     },
     "finish_change.py": {
-      "baseline": "18164faaaa96a7bb93440b1b3b79029dadd5a033af749081a4062301dfb65b91"
-    },
-    "hook_gate.py": {
-      "baseline": "bc290e300dee99e3d7a992db8b9bb1790c8fa720f548db14804a57f4534f3e6f"
-    },
-    "hook_profiles.py": {
-      "baseline": "ea92b5b7688173d7f76c0aec10225ff3bad0d568a1bab7bc3ac45c14f5e54b49"
+      "baseline": "3996c99dba184fe6d3619e7dd0cdc2afa967438d417a1b5f65413c929f149306"
     },
     "scope_audit.py": {
-      "baseline": "05342c4826ca54910ce32c44e6600674cb70166958478338b3028fc6d1cef10d"
+      "baseline": "f3dacc60eaf0122edbc6e5e8313efafbacf5e1e8a35c28067b35f428e9cce2d7"
     },
     "spec_data.py": {
-      "baseline": "b0ec4c048b20d9b22d4177a6b4a58af464b9dfe9e1592cad685e89b12c9caf25"
+      "baseline": "fd8c666eb5579e2becaa4c803b2c4c4e9840a994ed9c57222fe634b19af2d9d4"
     },
     "spec_first_guard.py": {
-      "baseline": "975549545d8d7b44e79c116f30cdc53f61139405640b81ed4bbc0d52604ea24e"
+      "baseline": "1e603552d36ab36e715d714e3fc3bd67b4d424c918805d1f9db405ce28f924cc"
     },
     "spec_lint.py": {
-      "baseline": "831118217ff698c2f80f07395a2c9050a086d7cae1f7f7dae01064708b0065e7"
+      "baseline": "b99419e6f67abc574757dc3941a26ca0bbfb945ebda7cbc13585169d736d6425"
     },
     "spec_model.py": {
-      "baseline": "1b2a1852263cfc409dca39c422ddca9014fbb2ebbcebef7cd5764f483af36294"
+      "baseline": "d94f7b0198f3ebc2fb3788fcb7a05ce811db3f98402718beead0cf8f4d465352"
     },
     "status_claims.py": {
-      "baseline": "00dc2a974347e43597e5ffcd620cf91ce533081db66f870667315b68f139cb19"
+      "baseline": "f110fab94572c3abcc481385eebda3bca4375e8471c57c59a6fc06d3dc8101ab"
     },
     "uc_change_list.py": {
-      "baseline": "b98bfc7dfae634acb61c00b0f860cda59a538ad430896820ac5cdd49c4185bc8"
+      "baseline": "ee6313cd0b7d13e34be1d0f80d6df5ca63f789fe875d954ace64b759cd68e434"
     },
     "unrecorded_changes.py": {
-      "baseline": "bb9eab8aef39bd943722641e39fd80a9b9db0a497bca3b23d4e4282a70c7fb9a"
+      "baseline": "7237373264bcc6201a39aba90f4aba52c9b8abf1e958f3d05269e77d7f87c319"
     },
     "use_case_map.py": {
-      "baseline": "f82944dfb55381cd0b9a42666c65fc200c6074231617af3e9894c86106f62f59"
+      "baseline": "3da713ba8643cf7ea1ca1bd5a0d26b76bcaf6b96ec0039a2bf94c29a76306c75"
     },
     "validate_use_case.py": {
-      "baseline": "801b2cf37a45b4b4dc43890e84e94185b1daf7e6db946de4762320493d1c5976"
-    },
-    "workflow_state.py": {
-      "baseline": "1da10d8c078f453a1e88aa8f03d552ca399ddeafe9fd8d152082b1d3e3efda79"
+      "baseline": "33aff1a374d85dd30e6b4622d7d1b8e9e9eecfbd7d0ce1d7ed8404fbb6766e90"
     }
   },
-  "version": "1.8.2",
-  "wiring": {
-    "claude": {
-      "adapted": [],
-      "entries": [
-        {
-          "fingerprint": "fd8788bc79cb300d58e0f886ef9f352a83ba59d6266ce29628b673ec30f29ceb",
-          "moment": "session-start"
-        },
-        {
-          "fingerprint": "38909b99ace3f6236522bde1f17df7ca750a8fa2fc58680f77facc0ca3e5dc58",
-          "moment": "after-edit"
-        },
-        {
-          "fingerprint": "63f3984d5287d47e72e2e41476b9cb7a08ca43337e84e9941682a675d339f793",
-          "moment": "after-edit"
-        },
-        {
-          "fingerprint": "d3d3aed84c1275319fb4107962778f14c93a5724ae32f872312c71001b672f2f",
-          "moment": "before-stop"
-        },
-        {
-          "fingerprint": "1be8a788a6d9efcfa39fa01d1e83e98fa8829eb8abfebc1ab3aa0bc1187237df",
-          "moment": "turn-start"
-        }
-      ],
-      "file": ".claude/settings.json",
-      "tool": "claude"
-    }
-  }
+  "version": "2.0.0"
 }
