@@ -9,13 +9,13 @@
 - **Next step:** run the second fresh-context review of all nine specifications (`up-6-reviewing-specifications`, routed with `railhand route --stage adhoc`); the run of 2026-10-05 was stopped before it wrote a report. When it is clean, the nine move to Reviewed
 - **Blocked by:** nothing
 - **Waiting on owner:** nothing until the specs are Reviewed; then the Approved signature on each Status line, and whether to give AB-001 to AB-006 their `Specs` lines
-- **Restart:** `python3 tools/specs/workflow_state.py`, then read `docs/reviews/all-review-1.md` and `docs/recovery/change-log.md`
+- **Restart:** ask the upspec router for the state (`up-0-navigating-spec-driven-work`), then read `docs/reviews/all-review-1.md` and `docs/recovery/change-log.md`
 - **Plan:** none
 - **Updated:** 2026-10-05
 
 ## Pending
 
-- [ ] Prove the agent hooks (upspec 1.8.1 wiring, now with turn-start) in a new session and add the `**Hooks:**` line to `AGENTS.md`; the proof steps are in the hooks reference of `up-bootstrapping-spec-driven-projects`
+- Nothing pending.
 
 ## Debt
 

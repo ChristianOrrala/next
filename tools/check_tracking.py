@@ -81,7 +81,7 @@ import sys
 from collections import namedtuple
 
 # The version of the A-files this check ships with; a test keeps it equal to the plugin's manifests.
-A_FILES_VERSION = "1.8.2"
+A_FILES_VERSION = "2.0.0"
 # The shape of the --format json object; it rises only when a key changes its meaning or goes away.
 DATA_SCHEMA = 1
 MARKER = "<!-- hot zone ends -->"

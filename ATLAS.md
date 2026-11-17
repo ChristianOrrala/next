@@ -13,8 +13,8 @@
 | Clipboard | Copies an item through the local tool and OSC 52 | `next` (`clipboard`) | `pbcopy`, `wl-copy`, `xclip` or `xsel` when present | `tests/test_next.py` (`Clipboard`) |
 | Docs | The user guide and the changelog | `README.md`, `CHANGELOG.md` | — | review |
 | Tracking | The A-files and their shape check | `AGENTS.md`, `tools/check_tracking.py`, `.githooks/pre-commit` | — | `tools/check_tracking.py` |
-| Specifications | What the system does, written before it is built (upspec 1.8.1, solo profile) | `docs/vision.md`, `docs/use_cases.md`, `docs/use_cases/`, `docs/entity_model.md`, `docs/change-records/`, `docs/test_cases/` | — | `tools/specs/spec_lint.py` and `tools/specs/validate_use_case.py` |
-| Specification hooks | The checks run by the agent's hooks and the commit guard | `tools/specs/`, `.claude/settings.json`, `.githooks/commit-msg` | Specifications | `python3 tools/specs/workflow_state.py` |
+| Specifications | What the system does, written before it is built (upspec 2.0.0, solo profile) | `docs/vision.md`, `docs/use_cases.md`, `docs/use_cases/`, `docs/entity_model.md`, `docs/change-records/`, `docs/test_cases/` | — | `tools/specs/spec_lint.py` and `tools/specs/validate_use_case.py` |
+| Specification hooks | The checks run by the commit guard; the agent hooks come with the upspec and a-files plugins | `tools/specs/`, `.githooks/commit-msg` | Specifications | `python3 tools/specs/spec_lint.py` |
 
 ## Flow
 
