@@ -24,7 +24,7 @@ import unicodedata
 from typing import NamedTuple, Optional
 
 # the release these copies belong to; hook_gate.py refuses siblings of another release
-UPSPEC_VERSION = "2.0.0"
+UPSPEC_VERSION = "2.1.3"
 
 # --- vocabulary -------------------------------------------------------------
 
@@ -407,7 +407,7 @@ def _read_subset(lines):
     """
     clean = [line.rstrip("\r") for line in lines]
     if clean:
-        clean[0] = clean[0].lstrip("﻿")
+        clean[0] = clean[0].lstrip("\ufeff")   # a byte-order mark at the start of the file
     if not clean or clean[0].strip() != "---":
         return {}, 0, [], {}
     data, problems, refused = {}, [], {}
@@ -699,23 +699,63 @@ A_FILES_INDEX_LINES = 100
 TRACKED_A_FILES = ("ACTIVE.md", "ABILITIES.md", "AHEAD.md", "ATLAS.md")
 
 
+A_FILES_INDEX_HEADS = ("file", "files", "path")
+
+
+def blank_fences(lines):
+    """The lines with fenced blocks blanked, as the A-files' check reads them: a fence closes only on a bare run of
+    its own character at least as long as the one that opened it."""
+    out, fence = [], None
+    for line in lines:
+        mark = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            out.append("")
+            if mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) and not mark.group(2).strip():
+                fence = None
+        elif mark:
+            fence = mark.group(1)
+            out.append("")
+        else:
+            out.append(line)
+    return out
+
+
+def _a_files_tables(lines):
+    """Tables as the A-files' check reads them: a header line starting with a pipe, a separator, then every line
+    starting with a pipe; the closing pipe is optional. [(header cells, [{header: cell}])]."""
+    found, i = [], 0
+    while i < len(lines) - 1:
+        line, below = lines[i].strip(), lines[i + 1].strip()
+        if line.startswith("|") and re.match(r"^\|?\s*:?-{3,}", below):
+            header = [c.strip() for c in line.strip("|").split("|")]
+            rows, j = [], i + 2
+            while j < len(lines) and lines[j].strip().startswith("|"):
+                rows.append(dict(zip(header, [c.strip() for c in lines[j].strip().strip("|").split("|")])))
+                j += 1
+            found.append((header, rows))
+            i = j
+        else:
+            i += 1
+    return found
+
+
 def a_files_listed(agents_lines):
-    """The A-files the index of AGENTS.md lists, read as the A-files' check reads it: the rows of the tables in
-    its first 100 lines whose first cell is an A-file's name (in backticks, as a link, or after ./); fenced
-    blocks are examples. An AGENTS.md with no such row names its files in prose, and every A-file named in
-    those lines is listed."""
-    lines = agents_lines[:A_FILES_INDEX_LINES]
+    """The A-files the index of AGENTS.md lists, read as the A-files' check reads it: the rows of the tables whose
+    header starts with File (or Files, Path), wherever they sit in the file, whose first cell is an A-file's name
+    (in backticks, as a link, or after ./); without such a header, any table's rows. Fenced blocks are examples.
+    An AGENTS.md with no such row names its files in prose, and every A-file named in its first 100 lines is
+    listed: a passing mention further down lists nothing."""
     found = set()
-    for table in read_tables(lines):
-        if table["separator"] is None:
-            continue
-        for _, row, _ in table["rows"]:
-            cell = re.sub(r"\]\([^)]*\)", "", row.get(table["header"][0], "")).strip("[]` ")
+    every = _a_files_tables(blank_fences(agents_lines))
+    index = [t for t in every if t[0] and t[0][0].strip("`* ").lower() in A_FILES_INDEX_HEADS] or every
+    for header, rows in index:
+        for row in rows:
+            cell = re.sub(r"\]\([^)]*\)", "", row.get(header[0], "")).strip("[]` ")
             found.add(cell[2:] if cell.startswith("./") else cell)
     found &= set(TRACKED_A_FILES)
     if found:
         return found
-    prose = "\n".join(line for _, line in outside_fences(lines))
+    prose = "\n".join(blank_fences(agents_lines)[:A_FILES_INDEX_LINES])
     return {name for name in TRACKED_A_FILES if name in prose}
 
 
@@ -844,6 +884,19 @@ def _debt(hot):
             and re.search(r"[^\W_]", re.sub(r"<[^<>]*>", "", bullet))]
 
 
+ACTIVE_SECTIONS = ("now", "pending", "debt", "next new work")
+
+
+def _work_section(hot):
+    """The heading of a work section in ACTIVE's hot zone: a `## ` section other than the four the file always has.
+    It names work the owner committed to; while it is there the desk is not clear (pairing contract, row P3)."""
+    for _, line in outside_fences(hot):
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if match and match.group(1).lower() not in ACTIVE_SECTIONS:
+            return match.group(1)
+    return ""
+
+
 def _next_new_work(hot):
     """The text under `## Next new work` in ACTIVE's hot zone, its lines joined by spaces, up to the next heading or
     the `Below:` line; '' when it is empty, says none, or holds only the template's `<...>` placeholder."""
@@ -886,7 +939,7 @@ def read_tracking(root):
     ahead_items: {AH id: {title, kind, state, abilities, belongs_to, section, line}}: each row of an AHEAD table with
     the columns ID and Ability (the index and the history), with the `## ` heading it sits under and its line, and
     the entry's Belongs to line as written (None without one); an entry with no row has kind, state, section and line
-    None; debt: the bullets under ACTIVE's `## Debt`, empty when ACTIVE names another home for the current work."""
+    None; work_section: the heading of a work section in ACTIVE's hot zone, '' without one; debt: the bullets under ACTIVE's `## Debt`, empty when ACTIVE names another home for the current work."""
     if not a_files_present(root):
         return None
     hot = _hot_zone(_optional_file(root, "ACTIVE.md").lines)
@@ -901,7 +954,8 @@ def read_tracking(root):
                 "abilities_present": abilities_file.present,
                 "active_home": active_home, "abilities_home": _home(root, _hot_zone(abilities_lines)),
                 "ahead_home": _home(root, _hot_zone(ahead)),
-                "next_step": _field(hot, "Next step", whole=True), "next_new_work": _next_new_work(hot), "ahead_items": {}}
+                "next_step": _field(hot, "Next step", whole=True), "next_new_work": _next_new_work(hot), "ahead_items": {},
+                "work_section": _work_section(hot)}
 
     def ability(identifier, name):
         """The ability's record, made the first time an entry heading or an index row names it."""
@@ -2003,6 +2057,7 @@ class Rule:
         self.body = []               # (line, text)
         self.examples = None
         self.examples_blank_before = False
+        self.notes = []              # (line, text): blockquotes after the Examples table, not the rule
 
     def text(self):
         return " ".join(text.strip() for _, text in self.body if text.strip() and table_cells(text) is None)
@@ -2203,6 +2258,8 @@ def parse_use_case_lines(lines, path):
                     rule.examples["separator"] = (number, cells)
                 else:
                     rule.examples["rows"].append((number, cells))
+    for rule in uc.rules:
+        split_notes(rule)
     cited = uc.all_step_texts() + [(flow.trigger_line, flow.trigger, flow.label) for flow in uc.flows]
     for line_no, text, where in cited:
         local, external = split_external(text)
@@ -2547,6 +2604,8 @@ def find_markers(root, uc_id, suffixes=None):
 
 # Flow and business-rule labels carried by change-record element cells.
 UNIT = re.compile(r"\b(A\d+|BR-\d{3})\b")
+# A rule's note named in a record (UC-001 BR-001 (note)): it names no flow or rule.
+NOTE_REF = re.compile(r"\bBR-\d{3}\s*\(note\)", re.IGNORECASE)
 
 
 def record_rows_from(lines, uc_id):
@@ -2564,7 +2623,7 @@ def record_rows_from(lines, uc_id):
                 continue
             other = [u for u in RE_UC_ID.findall(cell) if u != uc_id]
             mine = True if uc_id in cell else (False if other else None)
-            units = [] if mine is False else UNIT.findall(cell)
+            units = [] if mine is False else UNIT.findall(NOTE_REF.sub("", cell))
             rows.append((cell, units, row.get(seen_col, "").strip() if seen_col else None, mine))
         return rows
     return None
@@ -3051,10 +3110,36 @@ def _diff_steps(prefix, old, new, changes):
             changes.append({"change": "added", "element": "%s %d" % (prefix, new[j].number), "old": None, "new": new_texts[j]})
 
 
-def rule_text(rule):
+def split_notes(rule):
+    """Move a rule's notes from its body to rule.notes: the blockquote that ends its section, after its Examples
+    table (or anywhere in a rule with no table), with the unmarked lines that continue a quoted line. A blockquote
+    followed by more of the rule, or one between the table's rows, stays rule text."""
+    body, start = rule.body, len(rule.body)
+    while start > 0:
+        number, text = body[start - 1]
+        if text.strip().startswith(">"):
+            start -= 1
+        elif (start > 1 and body[start - 2][1].strip().startswith(">") and body[start - 2][0] == number - 1
+              and table_cells(text) is None):
+            start -= 1                          # a lazy continuation of the quoted line above it
+        else:
+            break
+    if start == len(body) or not body[start][1].strip().startswith(">"):
+        return
+    if rule.examples is not None:
+        table = [rule.examples["line"]] + [n for n, _ in rule.examples["rows"]]
+        if rule.examples["separator"]:
+            table.append(rule.examples["separator"][0])
+        if body[start][0] < max(table):
+            return
+    rule.notes, rule.body = body[start:], body[:start]
+
+
+def rule_text(rule, notes=False):
     """A rule as the guard check fingerprints it: its name, then each line of its body and Examples table, whitespace
-    normalized, one per line."""
-    return "\n".join([norm_text(rule.name)] + [norm_text(text) for _, text in rule.body if text.strip()])
+    normalized, one per line. Its notes are left out; notes=True reads them in place, as releases before 2.1.3 did."""
+    lines = sorted(rule.body + (rule.notes if notes else []))
+    return "\n".join([norm_text(rule.name)] + [norm_text(text) for _, text in lines if text.strip()])
 
 
 def flow_text(flow):
@@ -3103,8 +3188,13 @@ def compare_use_cases(old, new):
             changes.append({"change": "added", "element": rule.id, "old": None, "new": text})
         else:
             before = "%s: %s" % (previous.name, previous.text())
-            if norm_text(before) != norm_text(text):
+            if rule_text(previous) != rule_text(rule):      # its sentence or its Examples table
                 changes.append({"change": "changed", "element": rule.id, "old": before, "new": text})
+        notes_before = norm_text(" ".join(t.strip() for _, t in previous.notes)) if previous else ""
+        notes_now = norm_text(" ".join(t.strip() for _, t in rule.notes))
+        if notes_before != notes_now:              # a note is not the rule: reported apart, it needs no guard check
+            kind = "added" if not notes_before else ("removed" if not notes_now else "changed")
+            changes.append({"change": kind, "element": "%s (note)" % rule.id, "old": notes_before or None, "new": notes_now or None})
     for rule in old_rules.values():
         changes.append({"change": "removed", "element": "%s (was)" % rule.id, "old": "%s: %s" % (rule.name, rule.text()), "new": None})
     return changes

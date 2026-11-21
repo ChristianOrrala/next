@@ -1,41 +1,41 @@
 {
   "scripts": {
     "change_view.py": {
-      "baseline": "f9c92f571e09b74f040c248d52365cbc88f342864e09dddb6f945678978a8e87"
+      "baseline": "3680badd6a74c75226333c56e03186aaffdeee9c98aabdf95eaaa534914a63c4"
     },
     "finish_change.py": {
-      "baseline": "3996c99dba184fe6d3619e7dd0cdc2afa967438d417a1b5f65413c929f149306"
+      "baseline": "58489cb88247611d8db707ded5f980124254029e11ea9b2c370573429cf52811"
     },
     "scope_audit.py": {
-      "baseline": "f3dacc60eaf0122edbc6e5e8313efafbacf5e1e8a35c28067b35f428e9cce2d7"
+      "baseline": "ca57f9545890adc88a7cd50ef211f89b97e9d458e3dc9a66f958979e0b1a04c7"
     },
     "spec_data.py": {
-      "baseline": "fd8c666eb5579e2becaa4c803b2c4c4e9840a994ed9c57222fe634b19af2d9d4"
+      "baseline": "e226f8f4798e2c1e0ebfbd013c4bb4c5c3e8f0b6e3fd665c60e3f7906a02121e"
     },
     "spec_first_guard.py": {
-      "baseline": "1e603552d36ab36e715d714e3fc3bd67b4d424c918805d1f9db405ce28f924cc"
+      "baseline": "3359e9ec91beacacfec2a654dc694570359360841bf3f65da0d28846e120c09a"
     },
     "spec_lint.py": {
-      "baseline": "b99419e6f67abc574757dc3941a26ca0bbfb945ebda7cbc13585169d736d6425"
+      "baseline": "b09ba2fbe62ec5134fd55d0e1b42878192dbbe176a9882c959704386bfd714cd"
     },
     "spec_model.py": {
-      "baseline": "d94f7b0198f3ebc2fb3788fcb7a05ce811db3f98402718beead0cf8f4d465352"
+      "baseline": "696462b6cb5b6bb181e9fdfbd8a9f058eb9a811ba87b440192ea260c6f8851be"
     },
     "status_claims.py": {
-      "baseline": "f110fab94572c3abcc481385eebda3bca4375e8471c57c59a6fc06d3dc8101ab"
+      "baseline": "d45760b1541f5ebaa36cdd856258a1abd9706dc018aa28de43201ba5fd610aeb"
     },
     "uc_change_list.py": {
-      "baseline": "ee6313cd0b7d13e34be1d0f80d6df5ca63f789fe875d954ace64b759cd68e434"
+      "baseline": "d4f33c0611d2e53b2861e15b819ca9377face43be7a7d495de1419f9ab5af30d"
     },
     "unrecorded_changes.py": {
-      "baseline": "7237373264bcc6201a39aba90f4aba52c9b8abf1e958f3d05269e77d7f87c319"
+      "baseline": "92cfe70a5d6ce131bd559a16b59c6523c3e445b05096e355bb9f1d858f8b2f34"
     },
     "use_case_map.py": {
-      "baseline": "3da713ba8643cf7ea1ca1bd5a0d26b76bcaf6b96ec0039a2bf94c29a76306c75"
+      "baseline": "46d73bd260bfecd6afde197f06d6cef2fb5699d359a1607b55e92f33d17f5187"
     },
     "validate_use_case.py": {
-      "baseline": "33aff1a374d85dd30e6b4622d7d1b8e9e9eecfbd7d0ce1d7ed8404fbb6766e90"
+      "baseline": "5d109a7c6bce1de6743ba2c767b311992b7835c22861a59f80e189909811ec9e"
     }
   },
-  "version": "2.0.0"
+  "version": "2.1.3"
 }
